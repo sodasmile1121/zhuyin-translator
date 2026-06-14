@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 生字注音分析系統</title>
+    <style>
+        :root {
+            --bg-main: #0b0f19;
+            --bg-card: #131a2c;
+            --bg-input: #1e293b;
+            --border-color: #334155;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --primary-glow: linear-gradient(135deg, #818cf8 0%, #c084fc 100%);
+            --ruby-color: #38bdf8;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+            background-color: var(--bg-main);
+            color: var(--text-main);
+            min-height: 100vh;
+            padding: 50px 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 800px;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 45px;
+        }
+
+        header h1 {
+            font-size: 2.6rem;
+            font-weight: 800;
+            background: linear-gradient(to right, #fff 30%, #a5b4fc 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 12px;
+            letter-spacing: -0.5px;
+        }
+
+        header p {
+            color: var(--text-muted);
+            font-size: 1.05rem;
+        }
+
+        /* 儀表板控制區塊 */
+        .upload-card {
+            background: var(--bg-card);
+            padding: 35px;
+            border-radius: 20px;
+            border: 1px solid var(--border-color);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+            margin-bottom: 35px;
+            position: relative;
+        }
+
+        .file-dropzone {
+            border: 2px dashed #475569;
+            padding: 45px 20px;
+            border-radius: 14px;
+            text-align: center;
+            background: rgba(30, 41, 59, 0.4);
+            cursor: pointer;
+            display: block;
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .file-dropzone:hover {
+            border-color: #818cf8;
+            background: rgba(129, 140, 248, 0.06);
+            box-shadow: 0 0 20px rgba(129, 140, 248, 0.1);
+        }
+
+        .file-dropzone icon {
+            font-size: 2.5rem;
+            display: block;
+            margin-bottom: 15px;
+        }
+
+        .file-dropzone input[type="file"] {
+            display: none;
+        }
+
+        .file-dropzone strong {
+            color: #f1f5f9;
+            font-size: 1.1rem;
+        }
+
+        .file-dropzone span {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            display: block;
+            margin-top: 5px;
+        }
+
+        .file-count-tip {
+            margin-top: 10px;
+            font-size: 0.9rem;
+            color: #a78bfa;
+            font-weight: 600;
+        }
+
+        .btn-submit {
+            display: block;
+            width: 100%;
+            background: var(--primary-glow);
+            color: #0f172a;
+            border: none;
+            padding: 15px;
+            font-size: 1.1rem;
+            font-weight: 700;
+            border-radius: 12px;
+            margin-top: 25px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .btn-submit:hover {
+            opacity: 0.95;
+            box-shadow: 0 0 25px rgba(192, 132, 252, 0.4);
+            transform: translateY(-1px);
+        }
+
+        .btn-submit:active { transform: translateY(1px); }
+
+        /* Loading 動態效果 */
+        #loading {
+            display: none;
+            text-align: center;
+            margin: 40px 0;
+            color: #cbd5e1;
+        }
+
+        .spinner {
+            width: 36px;
+            height: 36px;
+            border: 3px solid rgba(255,255,255,0.05);
+            border-top-color: #818cf8;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* 結果卡片區塊 */
+        .file-card {
+            background: var(--bg-card);
+            padding: 35px;
+            border-radius: 20px;
+            border: 1px solid var(--border-color);
+            margin-bottom: 30px;
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.2);
+            animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(15px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .file-card h3 {
+            font-size: 1.3rem;
+            color: #f1f5f9;
+            margin-bottom: 16px;
+            font-weight: 700;
+            border-left: 4px solid #818cf8;
+            padding-left: 12px;
+        }
+
+        .preview-box {
+            background: #1e293b;
+            padding: 14px 18px;
+            border-radius: 10px;
+            font-size: 0.95rem;
+            color: var(--text-muted);
+            margin-bottom: 25px;
+            border: 1px solid rgba(255,255,255,0.02);
+        }
+        
+        .preview-box strong {
+            color: #cbd5e1;
+        }
+
+        /* 漢字注音網格 */
+        .words-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(70px, 1fr));
+            gap: 14px;
+            margin-top: 15px;
+        }
+
+        .word-badge {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 12px 8px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            transition: all 0.2s ease;
+        }
+        
+        .word-badge:hover {
+            background: rgba(255, 255, 255, 0.07);
+            border-color: #475569;
+            transform: translateY(-3px);
+        }
+
+        ruby {
+            font-size: 2.2rem;
+            font-weight: 600;
+            color: #ffffff;
+            ruby-position: over;
+        }
+
+        rt {
+            font-size: 0.75rem;
+            font-weight: 700;
+            color: var(--ruby-color);
+            padding-bottom: 6px;
+            letter-spacing: 1.5px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <header>
+            <h1>📚 AI 生字注音分析</h1>
+            <p>上傳 PDF 文件，自動解析文字結構並呈現精美注音排版</p>
+        </header>
+        
+        <div class="upload-card">
+            <form id="uploadForm">
+                <label class="file-dropzone" id="dropzone">
+                    <icon>⚡</icon>
+                    <strong>點擊或拖曳 PDF 至此處</strong>
+                    <span>支援多檔案同時解析</span>
+                    <div class="file-count-tip" id="fileCountTip"></div>
+                    <input type="file" id="fileInput" name="files" multiple required accept="application/pdf">
+                </label>
+                <button type="submit" class="btn-submit">執行智慧分析</button>
+            </form>
+        </div>
+
+        <div id="loading">
+            <div class="spinner"></div>
+            <p>AI 正在計算並生成注音標註...</p>
+        </div>
+
+        <div id="results"></div>
+    </div>
+
+    <script>
+        const form = document.getElementById('uploadForm');
+        const fileInput = document.getElementById('fileInput');
+        const fileCountTip = document.getElementById('fileCountTip');
+        const loading = document.getElementById('loading');
+        const resultsDiv = document.getElementById('results');
+
+        fileInput.onchange = () => {
+            const count = fileInput.files.length;
+            if (count > 0) {
+                fileCountTip.textContent = `✓ 已準備好 ${count} 個檔案`;
+            } else {
+                fileCountTip.textContent = '';
+            }
+        };
+
+        form.onsubmit = async (e) => {
+            e.preventDefault(); 
+            
+            loading.style.display = 'block';
+            resultsDiv.innerHTML = '';
+
+            const formData = new FormData(form);
+
+            try {
+                const response = await fetch('/uploadfiles/', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const resData = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(resData.detail || "後端處理失敗");
+                }
+
+                if (resData && resData.data) {
+                    renderUI(resData.data);
+                } else {
+                    alert("未接收到有效資料");
+                }
+
+            } catch (error) {
+                alert("發生錯誤：" + error.message);
+            } finally {
+                loading.style.display = 'none';
+            }
+        };
+
+        function renderUI(files) {
+            if (!files || !Array.isArray(files)) return;
+
+            files.forEach(file => {
+                const card = document.createElement('div');
+                card.className = 'file-card';
+                
+                let wordsHTML = '';
+                
+                if (file.char_zy && Array.isArray(file.char_zy)) {
+                    file.char_zy.forEach(item => {
+                        wordsHTML += `
+                            <div class="word-badge">
+                                <ruby>${item.char}<rt>${item.zy || '&nbsp;'}</rt></ruby>
+                            </div>
+                        `;
+                    });
+                } else {
+                    wordsHTML = '<p style="color:var(--text-muted);">無文字分析資料</p>';
+                }
+
+                const displayFileName = file.path.split('_').slice(1).join('_') || file.path;
+
+                card.innerHTML = `
+                    <h3>${displayFileName}</h3>
+                    <div class="preview-box">
+                        <strong>📄 文本前瞻：</strong>${file.preview || '無預覽'}...
+                    </div>
+                    <div class="words-container">${wordsHTML}</div>
+                `;
+                resultsDiv.appendChild(card);
+            });
+        }
+    </script>
+</body>
+</html>
