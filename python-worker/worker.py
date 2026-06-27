@@ -33,10 +33,12 @@ def worker_task(worker_id):
             try:
                 result_data = process_file_task(job.file_path) 
                 r.set(RESULT_KEY, json.dumps(result_data), ex=3600)
+                r.publish('job_status_channel', json.dumps({'job_id': job.job_id, 'status': 'success'}))
                 print(f"{job.job_id} completed. The result is written back to Redis.")
             except Exception as exc:
                 error_payload = {"status": "failed", "error": str(exc)}
                 r.set(RESULT_KEY, json.dumps(error_payload), ex=3600)
+                r.publish('job_status_channel', json.dumps({'job_id': job.job_id, 'status': 'fail'}))
                 print(f"{job.job_id} failed.")
                 traceback.print_exc()
         except Exception as queue_err:

@@ -9,19 +9,27 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 )
 
 type Server struct {
 	rdb *redis.Client
 	ctx context.Context
+	hub *Hub
 }
 
 type JobInfo struct {
 	JobID    string `json:"job_id"`
 	FilePath string `json:"file_path"`
+}
+
+type Hub struct {
+	connections map[string]*websocket.Conn
+	mux         sync.RWMutex
 }
 
 func saveFiles(files []*multipart.FileHeader) ([]string, error) {
@@ -71,6 +79,94 @@ func saveFiles(files []*multipart.FileHeader) ([]string, error) {
 	}
 	success = true
 	return savePaths, nil
+}
+
+func NewHub() *Hub {
+	return &Hub{
+		connections: make(map[string]*websocket.Conn),
+	}
+}
+
+func (h *Hub) Register(jobID string, conn *websocket.Conn) {
+	h.mux.Lock()
+	defer h.mux.Unlock()
+	h.connections[jobID] = conn
+}
+
+func (h *Hub) Unregister(jobID string) {
+	h.mux.Lock()
+	defer h.mux.Unlock()
+	if conn, exists := h.connections[jobID]; exists {
+		conn.Close()
+		delete(h.connections, jobID)
+	}
+}
+
+func (s *Server) startRedisSub() {
+	pubsub := s.rdb.Subscribe(s.ctx, "job_status_channel")
+	ch := pubsub.Channel()
+
+	go func() {
+		for msg := range ch {
+			var data map[string]interface{}
+			if err := json.Unmarshal([]byte(msg.Payload), &data); err != nil {
+				continue
+			}
+			jobID, ok := data["job_id"].(string)
+			if !ok {
+				continue
+			}
+			s.hub.mux.RLock()
+			conn, exists := s.hub.connections[jobID]
+			s.hub.mux.RUnlock()
+
+			if exists {
+				err := conn.WriteMessage(websocket.TextMessage, []byte(msg.Payload))
+				if err != nil {
+					fmt.Printf("Failed to push notification to Job %s: %v\n", jobID, err)
+				} else {
+					fmt.Printf("Successfully pushed job %s completion message to frontend!\n", jobID)
+				}
+				s.hub.Unregister(jobID)
+			} else {
+				fmt.Printf("The websocket for job %s has not been established", jobID)
+			}
+		}
+	}()
+}
+
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin:     func(r *http.Request) bool { return true },
+}
+
+func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	jobID := r.URL.Query().Get("job_id")
+	if jobID == "" {
+		http.Error(w, "Missing job_id query parameter", http.StatusBadRequest)
+		return
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		fmt.Println("Fail to upgrade WebSocket:", err)
+		return
+	}
+	fmt.Printf("Frontend connnect Successfully to Go. Job %s is listening...\n", jobID)
+	s.hub.Register(jobID, conn)
+	go func() {
+		defer func() {
+			s.hub.Unregister(jobID)
+			fmt.Printf("Job %s is disconnected to Go。\n", jobID)
+		}()
+		for {
+			// If frontend close or disconnect, ReadMessage report error, triggering break
+			_, _, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+		}
+	}()
 }
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
@@ -150,13 +246,16 @@ func main() {
 	},
 	)
 	ctx := context.Background()
-	srv := &Server{rdb: rdb, ctx: ctx}
+	hub := NewHub()
+	srv := &Server{rdb: rdb, ctx: ctx, hub: hub}
+	srv.startRedisSub()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "./index.html")
 	})
 	http.HandleFunc("/upload", srv.handleUpload)
 	http.HandleFunc("/status", srv.handleStatus)
+	http.HandleFunc("/ws", srv.handleWebSocket)
 	fmt.Println("Server is running on http://localhost:8080")
 	http.ListenAndServe(":8080", nil)
 }
