@@ -4,12 +4,13 @@ from models.document import Document
 import asyncio
 
 
-async def process_file_task(path):
+def process_file_task(path):
     doc = Document()
-    doc.text = await asyncio.to_thread(extract_text_from_pdf, path)
-    doc.char_zy = await asyncio.to_thread(get_pinyin, doc.text)
+    doc.text = extract_text_from_pdf(path)
+    doc.char_zy = get_pinyin(doc.text)
     
     return {
+        "status": "success",
         "path": path,
         "preview": doc.text[0][:10],
         "char_zy": doc.char_zy[0][:10],

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI 生字注音分析系統</title>
+    <title>AI 生字注音分析系統 - 智慧併發版</title>
     <style>
         :root {
             --bg-main: #0b0f19;
@@ -54,7 +54,7 @@
             font-size: 1.05rem;
         }
 
-        /* 儀表板控制區塊 */
+        /* 控制區塊 */
         .upload-card {
             background: var(--bg-card);
             padding: 35px;
@@ -62,7 +62,6 @@
             border: 1px solid var(--border-color);
             box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
             margin-bottom: 35px;
-            position: relative;
         }
 
         .file-dropzone {
@@ -132,29 +131,7 @@
             transform: translateY(-1px);
         }
 
-        .btn-submit:active { transform: translateY(1px); }
-
-        /* Loading 動態效果 */
-        #loading {
-            display: none;
-            text-align: center;
-            margin: 40px 0;
-            color: #cbd5e1;
-        }
-
-        .spinner {
-            width: 36px;
-            height: 36px;
-            border: 3px solid rgba(255,255,255,0.05);
-            border-top-color: #818cf8;
-            border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-            margin: 0 auto 15px;
-        }
-
-        @keyframes spin { to { transform: rotate(360deg); } }
-
-        /* 結果卡片區塊 */
+        /* 檔案處理區塊卡片 */
         .file-card {
             background: var(--bg-card);
             padding: 35px;
@@ -171,12 +148,45 @@
         }
 
         .file-card h3 {
-            font-size: 1.3rem;
+            font-size: 1.2rem;
             color: #f1f5f9;
             margin-bottom: 16px;
             font-weight: 700;
             border-left: 4px solid #818cf8;
             padding-left: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        /* 檔案狀態標籤 */
+        .status-badge {
+            font-size: 0.85rem;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-weight: 600;
+        }
+        .status-badge.waiting {
+            background: rgba(234, 179, 8, 0.15);
+            color: #eab308;
+            border: 1px solid rgba(234, 179, 8, 0.3);
+            animation: pulse 1.5s infinite;
+        }
+        .status-badge.success {
+            background: rgba(34, 197, 94, 0.15);
+            color: #22c55e;
+            border: 1px solid rgba(34, 197, 94, 0.3);
+        }
+        .status-badge.failed {
+            background: rgba(239, 68, 68, 0.15);
+            color: #ef4444;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+
+        @keyframes pulse {
+            0% { opacity: 0.6; }
+            50% { opacity: 1; }
+            100% { opacity: 0.6; }
         }
 
         .preview-box {
@@ -189,11 +199,9 @@
             border: 1px solid rgba(255,255,255,0.02);
         }
         
-        .preview-box strong {
-            color: #cbd5e1;
-        }
+        .preview-box strong { color: #cbd5e1; }
 
-        /* 漢字注音網格 */
+        /* 注音網格 */
         .words-container {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(70px, 1fr));
@@ -248,17 +256,12 @@
                 <label class="file-dropzone" id="dropzone">
                     <icon>⚡</icon>
                     <strong>點擊或拖曳 PDF 至此處</strong>
-                    <span>支援多檔案同時解析</span>
+                    <span>支援多檔案同時上傳、同步非同步排隊處理</span>
                     <div class="file-count-tip" id="fileCountTip"></div>
                     <input type="file" id="fileInput" name="files" multiple required accept="application/pdf">
                 </label>
                 <button type="submit" class="btn-submit">執行智慧分析</button>
             </form>
-        </div>
-
-        <div id="loading">
-            <div class="spinner"></div>
-            <p>AI 正在計算並生成注音標註...</p>
         </div>
 
         <div id="results"></div>
@@ -268,83 +271,131 @@
         const form = document.getElementById('uploadForm');
         const fileInput = document.getElementById('fileInput');
         const fileCountTip = document.getElementById('fileCountTip');
-        const loading = document.getElementById('loading');
         const resultsDiv = document.getElementById('results');
+
+        // 用來追蹤儲存所有正在執行的輪詢計時器，避免鬼影重疊
+        let activeIntervals = {};
 
         fileInput.onchange = () => {
             const count = fileInput.files.length;
-            if (count > 0) {
-                fileCountTip.textContent = `✓ 已準備好 ${count} 個檔案`;
-            } else {
-                fileCountTip.textContent = '';
-            }
+            fileCountTip.textContent = count > 0 ? `✓ 已準備好 ${count} 個檔案` : '';
         };
 
         form.onsubmit = async (e) => {
             e.preventDefault(); 
             
-            loading.style.display = 'block';
+            // 清除前一次的所有舊計時器與舊畫面
+            Object.values(activeIntervals).forEach(clearInterval);
+            activeIntervals = {};
             resultsDiv.innerHTML = '';
 
             const formData = new FormData(form);
 
             try {
-                const response = await fetch('/uploadfiles/', {
+                // 1. 打向 Go 後端優化過後的 /upload 接口
+                const response = await fetch('http://localhost:8080/upload', {
                     method: 'POST',
                     body: formData
                 });
 
-                const resData = await response.json();
+                // 2. 拿到 Go 回傳的 []JobInfo 陣列
+                const jobList = await response.json();
 
                 if (!response.ok) {
-                    throw new Error(resData.detail || "後端處理失敗");
+                    throw new Error(jobList.error || "後端派發任務失敗");
                 }
 
-                if (resData && resData.data) {
-                    renderUI(resData.data);
-                } else {
-                    alert("未接收到有效資料");
+                if (Array.isArray(jobList) && jobList.length > 0) {
+                    // 3. 為每一個任務在畫面上創建獨立的卡片骨架
+                    jobList.forEach(job => {
+                        createJobCard(job.job_id, job.file_path);
+                        // 4. 為該任務啟動專屬的獨立 Polling 機制
+                        startPolling(job.job_id);
+                    });
                 }
 
             } catch (error) {
-                alert("發生錯誤：" + error.message);
-            } finally {
-                loading.style.display = 'none';
+                alert("上傳發生錯誤：" + error.message);
             }
         };
 
-        function renderUI(files) {
-            if (!files || !Array.isArray(files)) return;
+        // 🏗️ 在畫面上先幫任務佔位子，展現排隊中動態
+        function createJobCard(jobId, filePath) {
+            const fileName = filePath.split('/').pop().replace(/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}_/, '');
+            
+            const card = document.createElement('div');
+            card.className = 'file-card';
+            card.id = `card-${jobId}`; // 用 ID 鎖定這張卡片
+            card.innerHTML = `
+                <h3>
+                    <span>📄 ${fileName}</span>
+                    <span class="status-badge waiting" id="badge-${jobId}">AI 排隊分析中...</span>
+                </h3>
+                <div class="preview-box" id="preview-${jobId}">
+                    <strong>任務 ID：</strong><code>${jobId}</code><br>
+                    <strong>儲存路徑：</strong><small style="font-family: monospace; color:#64748b;">${filePath}</small>
+                </div>
+                <div class="words-container" id="words-${jobId}"></div>
+            `;
+            resultsDiv.appendChild(card);
+        }
 
-            files.forEach(file => {
-                const card = document.createElement('div');
-                card.className = 'file-card';
-                
-                let wordsHTML = '';
-                
-                if (file.char_zy && Array.isArray(file.char_zy)) {
-                    file.char_zy.forEach(item => {
-                        wordsHTML += `
-                            <div class="word-badge">
-                                <ruby>${item.char}<rt>${item.zy || '&nbsp;'}</rt></ruby>
-                            </div>
-                        `;
-                    });
-                } else {
-                    wordsHTML = '<p style="color:var(--text-muted);">無文字分析資料</p>';
+        // ⏱️ 每個任務獨立擁有的輪詢時鐘
+        function startPolling(jobId) {
+            activeIntervals[jobId] = setInterval(async () => {
+                try {
+                    const response = await fetch(`http://localhost:8080/status?job_id=${jobId}`);
+                    const resData = await response.json();
+
+                    const badge = document.getElementById(`badge-${jobId}`);
+                    const preview = document.getElementById(`preview-${jobId}`);
+                    const wordsContainer = document.getElementById(`words-${jobId}`);
+
+                    // 防禦性檢查：萬一使用者狂點導致卡片不小心不見了
+                    if (!badge) return;
+
+                    // 狀況 A：Python 還在算
+                    if (resData.status === 'processing') {
+                        console.log(`Job ${jobId} 仍在分析中...`);
+                        return;
+                    }
+
+                    // 狀況 B：Python 回報這張單死掉了
+                    if (resData.status === 'failed') {
+                        clearInterval(activeIntervals[jobId]);
+                        badge.className = 'status-badge failed';
+                        badge.innerText = '分析失敗';
+                        preview.innerHTML += `<br><span style="color:#ef4444;">❌ 錯誤原因：${resData.error || '未知錯誤'}</span>`;
+                        return;
+                    }
+
+                    // 狀況 C：這張單算完了！收割成果！
+                    clearInterval(activeIntervals[jobId]);
+                    badge.className = 'status-badge success';
+                    badge.innerText = '完成';
+
+                    // 更新預覽訊息
+                    preview.innerHTML = `<strong>📄 文本摘要前瞻：</strong>${resData.preview || '已順利完成注音標註'}`;
+
+                    // 渲染注音格子
+                    let wordsHTML = '';
+                    if (resData.char_zy && Array.isArray(resData.char_zy)) {
+                        resData.char_zy.forEach(item => {
+                            wordsHTML += `
+                                <div class="word-badge">
+                                    <ruby>${item.char}<rt>${item.zy || '&nbsp;'}</rt></ruby>
+                                </div>
+                            `;
+                        });
+                    } else {
+                        wordsHTML = '<p style="color:var(--text-muted); padding:10px;">Python 回傳資料格式不包含 char_zy</p>';
+                    }
+                    wordsContainer.innerHTML = wordsHTML;
+
+                } catch (err) {
+                    console.error(`輪詢 Job ${jobId} 時連線中斷:`, err);
                 }
-
-                const displayFileName = file.path.split('_').slice(1).join('_') || file.path;
-
-                card.innerHTML = `
-                    <h3>${displayFileName}</h3>
-                    <div class="preview-box">
-                        <strong>📄 文本前瞻：</strong>${file.preview || '無預覽'}...
-                    </div>
-                    <div class="words-container">${wordsHTML}</div>
-                `;
-                resultsDiv.appendChild(card);
-            });
+            }, 1000); // 每秒敲一次門
         }
     </script>
 </body>

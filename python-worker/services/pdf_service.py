@@ -8,19 +8,6 @@ from typing import List
 from fastapi import UploadFile
 
 
-def save_files(files: list[UploadFile]):
-    dir = "./uploads"
-    if not os.path.exists(dir):
-        os.makedirs(dir)
-    res = []
-    for file in files:
-        file.file.seek(0)  # make sure copy every file from the beginning
-        path = os.path.join(dir, f"{str(uuid.uuid4())}_{file.filename}")
-        with open(path, 'wb') as fdst:
-            shutil.copyfileobj(file.file, fdst)
-        res.append(path)
-    return res
-
 def extract_text_from_pdf(file_path: str) -> List[str]:
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Cannot find the file: {file_path}")
