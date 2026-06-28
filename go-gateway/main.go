@@ -34,6 +34,12 @@ type Hub struct {
 	mux         sync.RWMutex
 }
 
+type ResultPayload struct {
+	Status  string `json:"status"`
+	PdfPath string `json:"pdf_path"`
+	Error   string `json:"error"`
+}
+
 func saveFiles(files []*multipart.FileHeader) ([]string, error) {
 	dir := "./uploads"
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -172,6 +178,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	err := r.ParseMultipartForm(32 << 20)
 	if err != nil {
 		http.Error(w, "Failed to parse data", http.StatusBadRequest)
@@ -219,6 +226,20 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	w.Write(jsonResponse)
 }
 
+func (s *Server) fetchJobResult(jobID string) ([]byte, error) {
+	redisKey := fmt.Sprintf("result:%s", jobID)
+	compressedBytes, err := s.rdb.Get(s.ctx, redisKey).Bytes()
+	if err != nil {
+		return nil, err
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(compressedBytes))
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json")
@@ -227,8 +248,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error": "Missing job_id"}`, http.StatusBadRequest)
 		return
 	}
-	redisKey := fmt.Sprintf("result:%s", jobID)
-	compressedBytes, err := s.rdb.Get(s.ctx, redisKey).Bytes()
+	resultData, err := s.fetchJobResult(jobID)
 	if err == redis.Nil {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status": "processing", "message": "AI is still compiling..."}`))
@@ -237,19 +257,45 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error": "Redis fetch error"}`, http.StatusInternalServerError)
 		return
 	}
-	reader, err := gzip.NewReader(bytes.NewReader(compressedBytes))
-	if err != nil {
-		http.Error(w, `{"error": "Failed to initialize decompressor"}`, http.StatusInternalServerError)
-		return
-	}
-	defer reader.Close()
-	resultData, err := io.ReadAll(reader)
-	if err != nil {
-		http.Error(w, `{"error": "Failed to read compressed data"}`, http.StatusInternalServerError)
-		return
-	}
 	w.WriteHeader(http.StatusOK)
 	w.Write(resultData)
+}
+
+func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	jobID := r.URL.Query().Get("job_id")
+	if jobID == "" {
+		http.Error(w, `{"error": "Missing job_id"}`, http.StatusBadRequest)
+		return
+	}
+	resultData, err := s.fetchJobResult(jobID)
+	if err == redis.Nil {
+		http.Error(w, "File is still processing, please wait...", http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, "Read decompress data error", http.StatusInternalServerError)
+		return
+	}
+	var payload ResultPayload
+	if err := json.Unmarshal(resultData, &payload); err != nil {
+		http.Error(w, "Parse JSON error", http.StatusInternalServerError)
+		return
+	}
+	if payload.Status == "failed" || payload.PdfPath == "" {
+		msg := fmt.Sprintf("Cannot download. Job failed: %s", payload.Error)
+		http.Error(w, msg, http.StatusUnprocessableEntity)
+		return
+	}
+	physicalPath := filepath.Join("../python-worker", payload.PdfPath)
+	if _, err := os.Stat(physicalPath); os.IsNotExist(err) {
+		http.Error(w, "Physical PDF file not found on disk", http.StatusNotFound)
+		return
+	}
+
+	fileName := filepath.Base(physicalPath)
+	w.Header().Set("Content-Type", "application/pdf")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fileName))
+	http.ServeFile(w, r, physicalPath)
 }
 
 func main() {
@@ -269,6 +315,7 @@ func main() {
 	http.HandleFunc("/upload", srv.handleUpload)
 	http.HandleFunc("/status", srv.handleStatus)
 	http.HandleFunc("/ws", srv.handleWebSocket)
+	http.HandleFunc("/download", srv.handleDownload)
 	fmt.Println("Server is running on http://localhost:8080")
 	http.ListenAndServe(":8080", nil)
 }

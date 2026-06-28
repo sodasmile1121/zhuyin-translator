@@ -240,7 +240,7 @@
             color: var(--ruby-color);
             padding-bottom: 6px;
             letter-spacing: 1.5px;
-        }
+		}
     </style>
 </head>
 <body>
@@ -454,7 +454,18 @@
 
             badge.className = 'status-badge success';
             badge.innerText = '完成';
-            preview.innerHTML = `<strong>📄 文本摘要前瞻：</strong>${data.preview || '已順利完成注音標註'}`;
+
+            // 📥 注入動態漸層的 PDF 下載按鈕，直接呼叫 Go 網關
+            preview.innerHTML = `
+                <strong>📄 文本摘要前瞻：</strong>${data.preview || '已順利完成注音標註'}<br><br>
+                <a href="http://localhost:8080/download?job_id=${jobId}" 
+                   style="display:inline-flex; align-items:center; background: linear-gradient(135deg, #34d399 0%, #059669 100%); color:#0b0f19; padding:10px 20px; border-radius:10px; text-decoration:none; font-weight:700; font-size:0.9rem; margin-top:5px; box-shadow: 0 4px 15px rgba(52, 211, 153, 0.2); transition:all 0.2s ease;"
+                   onmouseover="this.style.opacity=0.9; this.style.transform='translateY(-1px)'; this.style.boxShadow='0 6px 20px rgba(52, 211, 153, 0.4)';" 
+                   onmouseout="this.style.opacity=1; this.style.transform='translateY(0)'; this.style.boxShadow='0 4px 15px rgba(52, 211, 153, 0.2)';"
+                >
+                   📥 下載完整注音 PDF
+                </a>
+            `;
 
             if (data.char_zy && Array.isArray(data.char_zy)) {
                 wordsContainer.innerHTML = data.char_zy.map(item => `
