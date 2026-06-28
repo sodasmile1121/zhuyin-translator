@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -129,7 +131,7 @@ func (s *Server) startRedisSub() {
 				}
 				s.hub.Unregister(jobID)
 			} else {
-				fmt.Printf("The websocket for job %s has not been established", jobID)
+				fmt.Printf("The websocket for job %s has not been established\n", jobID)
 			}
 		}
 	}()
@@ -149,7 +151,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		fmt.Println("Fail to upgrade WebSocket:", err)
+		fmt.Println("Fail to upgrade WebSocket:\n", err)
 		return
 	}
 	fmt.Printf("Frontend connnect Successfully to Go. Job %s is listening...\n", jobID)
@@ -157,7 +159,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer func() {
 			s.hub.Unregister(jobID)
-			fmt.Printf("Job %s is disconnected to Go。\n", jobID)
+			fmt.Printf("Job %s is disconnected to Go\n", jobID)
 		}()
 		for {
 			// If frontend close or disconnect, ReadMessage report error, triggering break
@@ -178,7 +180,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	files := r.MultipartForm.File["files"]
 	for _, fh := range files {
 		if fh.Header.Get("Content-Type") != "application/pdf" {
-			msg := fmt.Sprintf("%s is not a pdf file", fh.Filename)
+			msg := fmt.Sprintf("%s is not a pdf file\n", fh.Filename)
 			http.Error(w, msg, http.StatusBadRequest)
 			return
 		}
@@ -226,7 +228,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	redisKey := fmt.Sprintf("result:%s", jobID)
-	resultData, err := s.rdb.Get(s.ctx, redisKey).Result()
+	compressedBytes, err := s.rdb.Get(s.ctx, redisKey).Bytes()
 	if err == redis.Nil {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status": "processing", "message": "AI is still compiling..."}`))
@@ -235,8 +237,19 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error": "Redis fetch error"}`, http.StatusInternalServerError)
 		return
 	}
+	reader, err := gzip.NewReader(bytes.NewReader(compressedBytes))
+	if err != nil {
+		http.Error(w, `{"error": "Failed to initialize decompressor"}`, http.StatusInternalServerError)
+		return
+	}
+	defer reader.Close()
+	resultData, err := io.ReadAll(reader)
+	if err != nil {
+		http.Error(w, `{"error": "Failed to read compressed data"}`, http.StatusInternalServerError)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(resultData))
+	w.Write(resultData)
 }
 
 func main() {

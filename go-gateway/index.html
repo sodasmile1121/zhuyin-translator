@@ -273,8 +273,10 @@
         const fileCountTip = document.getElementById('fileCountTip');
         const resultsDiv = document.getElementById('results');
 
-        // 用來追蹤儲存所有正在執行的輪詢計時器，避免鬼影重疊
+        // 管理活動中的資源，避免多重計時器或連線鬼影
+        let activeSockets = {};
         let activeIntervals = {};
+        let fallbackTimers = {};
 
         fileInput.onchange = () => {
             const count = fileInput.files.length;
@@ -284,48 +286,43 @@
         form.onsubmit = async (e) => {
             e.preventDefault(); 
             
-            // 清除前一次的所有舊計時器與舊畫面
+            // 全面重置：清除所有活動中的 WS 連線、輪詢計時器、保險定時器
+            Object.values(activeSockets).forEach(ws => ws.close());
             Object.values(activeIntervals).forEach(clearInterval);
+            Object.values(fallbackTimers).forEach(clearTimeout);
+            activeSockets = {};
             activeIntervals = {};
+            fallbackTimers = {};
             resultsDiv.innerHTML = '';
 
             const formData = new FormData(form);
 
             try {
-                // 1. 打向 Go 後端優化過後的 /upload 接口
                 const response = await fetch('http://localhost:8080/upload', {
                     method: 'POST',
                     body: formData
                 });
 
-                // 2. 拿到 Go 回傳的 []JobInfo 陣列
                 const jobList = await response.json();
-
-                if (!response.ok) {
-                    throw new Error(jobList.error || "後端派發任務失敗");
-                }
+                if (!response.ok) throw new Error(jobList.error || "後端派發任務失敗");
 
                 if (Array.isArray(jobList) && jobList.length > 0) {
-                    // 3. 為每一個任務在畫面上創建獨立的卡片骨架
                     jobList.forEach(job => {
                         createJobCard(job.job_id, job.file_path);
-                        // 4. 為該任務啟動專屬的獨立 Polling 機制
-                        startPolling(job.job_id);
+                        // 🔥 執行你的核心雙軌制：啟動監聽，並設定 1 秒後沒動靜啟動輪詢
+                        startSmartTracking(job.job_id);
                     });
                 }
-
             } catch (error) {
                 alert("上傳發生錯誤：" + error.message);
             }
         };
 
-        // 🏗️ 在畫面上先幫任務佔位子，展現排隊中動態
         function createJobCard(jobId, filePath) {
             const fileName = filePath.split('/').pop().replace(/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}_/, '');
-            
             const card = document.createElement('div');
             card.className = 'file-card';
-            card.id = `card-${jobId}`; // 用 ID 鎖定這張卡片
+            card.id = `card-${jobId}`; 
             card.innerHTML = `
                 <h3>
                     <span>📄 ${fileName}</span>
@@ -340,62 +337,145 @@
             resultsDiv.appendChild(card);
         }
 
-        // ⏱️ 每個任務獨立擁有的輪詢時鐘
-        function startPolling(jobId) {
+        // 🧠 核心雙軌控制中心
+        function startSmartTracking(jobId) {
+            // 軌道一：優先建立 WebSocket 監聽
+            connectJobWebSocket(jobId);
+
+            // 軌道二：🔥 保險定時炸彈（設定 1000 毫秒 = 1 秒）
+            fallbackTimers[jobId] = setTimeout(() => {
+                const badge = document.getElementById(`badge-${jobId}`);
+                // 如果 1 秒到了，畫面依然在「排隊分析中...」，代表 WS 被丟包或延遲了，立刻啟動輪詢保險！
+                if (badge && badge.classList.contains('waiting') && !activeIntervals[jobId]) {
+                    console.warn(`⏳ [Fallback] 任務 ${jobId} 超過 1 秒未收到 WS 推播，切換至主動輪詢模式！`);
+                    badge.innerText = "AI 分析中 (已啟動輪詢保險)...";
+                    
+                    // 關閉可能已經卡住的 WS 連線
+                    if (activeSockets[jobId]) {
+                        activeSockets[jobId].close();
+                    }
+                    
+                    // 啟動主動輪詢
+                    startPollingFallback(jobId);
+                }
+            }, 1000);
+        }
+
+        // 🔗 軌道一：WebSocket 輕量監聽器
+        function connectJobWebSocket(jobId) {
+            const ws = new WebSocket(`ws://localhost:8080/ws?job_id=${jobId}`);
+            activeSockets[jobId] = ws;
+
+            ws.onmessage = async (event) => {
+                try {
+                    const resData = JSON.parse(event.data);
+
+                    // 🛑 情況 A：收到 Python 通知失敗
+                    if (resData.status === 'failed' || resData.status === 'fail') {
+                        clearTimeout(fallbackTimers[jobId]); // 拆除炸彈
+                        renderFailure(jobId, "Python 處理異常");
+                        ws.close();
+                        return;
+                    }
+
+                    // 🟢 情況 B：收到 Python 通知成功
+                    if (resData.status === 'success') {
+                        console.log(`⚡ [WebSocket] 秒殺通知成功！任務 ${jobId} 已完成。`);
+                        clearTimeout(fallbackTimers[jobId]); // 拆除炸彈
+                        ws.close();
+                        
+                        // 收到狀態 success，立刻去拉取真正的數據
+                        fetchAndRenderResult(jobId);
+                    }
+                } catch (err) {
+                    console.error("WS 訊息解析失敗，等待保險觸發", err);
+                }
+            };
+
+            ws.onerror = () => {
+                // 如果 WS 一開始就連不上，不用等 1 秒，立刻拆除炸彈直接進輪詢
+                clearTimeout(fallbackTimers[jobId]);
+                if (!activeIntervals[jobId]) {
+                    console.log(`🔌 [WS 異常] 任務 ${jobId} 連線失敗，提早切換至輪詢保險。`);
+                    startPollingFallback(jobId);
+                }
+            };
+        }
+
+        // ⏱️ 軌道二：主動輪詢保險機制（每秒去敲一次門）
+        function startPollingFallback(jobId) {
             activeIntervals[jobId] = setInterval(async () => {
                 try {
                     const response = await fetch(`http://localhost:8080/status?job_id=${jobId}`);
                     const resData = await response.json();
 
-                    const badge = document.getElementById(`badge-${jobId}`);
-                    const preview = document.getElementById(`preview-${jobId}`);
-                    const wordsContainer = document.getElementById(`words-${jobId}`);
-
-                    // 防禦性檢查：萬一使用者狂點導致卡片不小心不見了
-                    if (!badge) return;
-
-                    // 狀況 A：Python 還在算
+                    // 狀況 A：仍在處理中，繼續等
                     if (resData.status === 'processing') {
-                        console.log(`Job ${jobId} 仍在分析中...`);
+                        console.log(`⏱️ [Polling] 任務 ${jobId} 仍在分析中...`);
                         return;
                     }
 
-                    // 狀況 B：Python 回報這張單死掉了
-                    if (resData.status === 'failed') {
+                    // 狀況 B：失敗了
+                    if (resData.status === 'failed' || resData.status === 'fail') {
                         clearInterval(activeIntervals[jobId]);
-                        badge.className = 'status-badge failed';
-                        badge.innerText = '分析失敗';
-                        preview.innerHTML += `<br><span style="color:#ef4444;">❌ 錯誤原因：${resData.error || '未知錯誤'}</span>`;
+                        renderFailure(jobId, resData.error || "未知錯誤");
                         return;
                     }
 
-                    // 狀況 C：這張單算完了！收割成果！
+                    // 狀況 C：成功了！直接拿結果渲染（因為 /status 本來就包含完整大資料）
                     clearInterval(activeIntervals[jobId]);
-                    badge.className = 'status-badge success';
-                    badge.innerText = '完成';
-
-                    // 更新預覽訊息
-                    preview.innerHTML = `<strong>📄 文本摘要前瞻：</strong>${resData.preview || '已順利完成注音標註'}`;
-
-                    // 渲染注音格子
-                    let wordsHTML = '';
-                    if (resData.char_zy && Array.isArray(resData.char_zy)) {
-                        resData.char_zy.forEach(item => {
-                            wordsHTML += `
-                                <div class="word-badge">
-                                    <ruby>${item.char}<rt>${item.zy || '&nbsp;'}</rt></ruby>
-                                </div>
-                            `;
-                        });
-                    } else {
-                        wordsHTML = '<p style="color:var(--text-muted); padding:10px;">Python 回傳資料格式不包含 char_zy</p>';
-                    }
-                    wordsContainer.innerHTML = wordsHTML;
+                    console.log(`🎉 [Polling] 輪詢成功捕獲結果！任務 ${jobId} 已渲染。`);
+                    renderSuccessHTML(jobId, resData);
 
                 } catch (err) {
-                    console.error(`輪詢 Job ${jobId} 時連線中斷:`, err);
+                    console.error(`輪詢任務 ${jobId} 發生網路錯誤:`, err);
                 }
-            }, 1000); // 每秒敲一次門
+            }, 1000);
+        }
+
+        // 📥 獨立抽離：發起 HTTP GET 請求完整大數據並渲染
+        async function fetchAndRenderResult(jobId) {
+            try {
+                const response = await fetch(`http://localhost:8080/status?job_id=${jobId}`);
+                const finalResult = await response.json();
+                renderSuccessHTML(jobId, finalResult);
+            } catch (fetchErr) {
+                console.error("HTTP GET 獲取大資料失敗:", fetchErr);
+                renderFailure(jobId, "資料載入失敗");
+            }
+        }
+
+        // 🎨 渲染成功畫面
+        function renderSuccessHTML(jobId, data) {
+            const badge = document.getElementById(`badge-${jobId}`);
+            const preview = document.getElementById(`preview-${jobId}`);
+            const wordsContainer = document.getElementById(`words-${jobId}`);
+            if (!badge) return;
+
+            badge.className = 'status-badge success';
+            badge.innerText = '完成';
+            preview.innerHTML = `<strong>📄 文本摘要前瞻：</strong>${data.preview || '已順利完成注音標註'}`;
+
+            if (data.char_zy && Array.isArray(data.char_zy)) {
+                wordsContainer.innerHTML = data.char_zy.map(item => `
+                    <div class="word-badge">
+                        <ruby>${item.char}<rt>${item.zy || '&nbsp;'}</rt></ruby>
+                    </div>
+                `).join('');
+            } else {
+                wordsContainer.innerHTML = '<p style="color:var(--text-muted); padding:10px;">無有效生字注音資料</p>';
+            }
+        }
+
+        // 🎨 渲染失敗畫面
+        function renderFailure(jobId, reason) {
+            const badge = document.getElementById(`badge-${jobId}`);
+            const preview = document.getElementById(`preview-${jobId}`);
+            if (!badge) return;
+
+            badge.className = 'status-badge failed';
+            badge.innerText = '分析失敗';
+            preview.innerHTML += `<br><span style="color:#ef4444;">❌ 錯誤原因：${reason}</span>`;
         }
     </script>
 </body>
