@@ -9,17 +9,21 @@ from processors.pipeline import process_file_task
 from services.pdf_generator import generate_zhuyin_pdf
 
 
+redis_addr = os.getenv("REDIS_ADDR")
+redis_host, redis_port = redis_addr.split(":")
+redis_port = int(redis_port)
+
 r_text = redis.Redis(
-    host='localhost', 
-    port=6379, 
+    host=redis_host, 
+    port=redis_port, 
     db=0,
     decode_responses=True,
     health_check_interval=30
 )
 
 r_raw = redis.Redis(
-    host='localhost', 
-    port=6379, 
+    host=redis_host, 
+    port=redis_port, 
     db=0,
     decode_responses=False,
     health_check_interval=30

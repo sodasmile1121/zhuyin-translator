@@ -1,7 +1,6 @@
 from services.pdf_service import extract_text_from_pdf
 from services.nlp_service import get_pinyin
 from models.document import Document
-import asyncio
 
 
 def process_file_task(path):

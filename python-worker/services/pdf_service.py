@@ -2,10 +2,7 @@ import os
 import re
 import unicodedata
 import fitz
-import shutil
-import uuid
 from typing import List
-from fastapi import UploadFile
 
 
 def extract_text_from_pdf(file_path: str) -> List[str]:

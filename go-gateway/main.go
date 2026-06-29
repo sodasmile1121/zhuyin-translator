@@ -286,7 +286,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, http.StatusUnprocessableEntity)
 		return
 	}
-	physicalPath := filepath.Join("../python-worker", payload.PdfPath)
+	physicalPath := filepath.Join("/app", payload.PdfPath)
 	if _, err := os.Stat(physicalPath); os.IsNotExist(err) {
 		http.Error(w, "Physical PDF file not found on disk", http.StatusNotFound)
 		return
@@ -299,8 +299,9 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	redisAddr := os.Getenv("REDIS_ADDR")
 	rdb := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
+		Addr: redisAddr,
 		DB:   0,
 	},
 	)
