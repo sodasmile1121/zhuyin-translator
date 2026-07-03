@@ -1,0 +1,29 @@
+import http from 'k6/http';
+import { sleep } from 'k6';
+
+export const options = {
+  discardResponseBodies: true, 
+  scenarios: {
+    upload_stress_test: {
+      executor: 'ramping-vus',
+      startVUs: 0,
+      stages: [
+        { duration: '10s', target: 100 },
+        { duration: '20s', target: 1000 },
+        { duration: '10s', target: 0 },
+      ],
+      gracefulRampDown: '2s',
+    },
+  },
+};
+
+const testPDF = open('./test.pdf', 'b')
+
+export default function () {
+  const data = {
+    files: http.file(testPDF, 'k6_test_file.pdf', 'application/pdf'),
+  };
+  const res = http.post('http://localhost:8080/upload', data);
+  console.log(`Response status: ${res.status}`);
+  sleep(0.5);
+}
