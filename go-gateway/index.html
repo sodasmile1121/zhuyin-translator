@@ -240,7 +240,7 @@
             color: var(--ruby-color);
             padding-bottom: 6px;
             letter-spacing: 1.5px;
-		}
+        }
     </style>
 </head>
 <body>
@@ -256,7 +256,7 @@
                 <label class="file-dropzone" id="dropzone">
                     <icon>⚡</icon>
                     <strong>點擊或拖曳 PDF 至此處</strong>
-                    <span>支援多檔案同時上傳、同步非同步排隊處理</span>
+                    <span>支援多檔案同時上傳、自動對帳與即時推播機制</span>
                     <div class="file-count-tip" id="fileCountTip"></div>
                     <input type="file" id="fileInput" name="files" multiple required accept="application/pdf">
                 </label>
@@ -273,10 +273,8 @@
         const fileCountTip = document.getElementById('fileCountTip');
         const resultsDiv = document.getElementById('results');
 
-        // 管理活動中的資源，避免多重計時器或連線鬼影
+        // 資源追蹤器，防範連線鬼影
         let activeSockets = {};
-        let activeIntervals = {};
-        let fallbackTimers = {};
 
         fileInput.onchange = () => {
             const count = fileInput.files.length;
@@ -286,13 +284,9 @@
         form.onsubmit = async (e) => {
             e.preventDefault(); 
             
-            // 全面重置：清除所有活動中的 WS 連線、輪詢計時器、保險定時器
+            // 清理舊連線與卡片
             Object.values(activeSockets).forEach(ws => ws.close());
-            Object.values(activeIntervals).forEach(clearInterval);
-            Object.values(fallbackTimers).forEach(clearTimeout);
             activeSockets = {};
-            activeIntervals = {};
-            fallbackTimers = {};
             resultsDiv.innerHTML = '';
 
             const formData = new FormData(form);
@@ -309,7 +303,7 @@
                 if (Array.isArray(jobList) && jobList.length > 0) {
                     jobList.forEach(job => {
                         createJobCard(job.job_id, job.file_path);
-                        // 🔥 執行你的核心雙軌制：啟動監聽，並設定 1 秒後沒動靜啟動輪詢
+                        // 🎯 直接啟動智慧追蹤（靠 WS 監聽與後端主動對帳）
                         startSmartTracking(job.job_id);
                     });
                 }
@@ -326,7 +320,7 @@
             card.innerHTML = `
                 <h3>
                     <span>📄 ${fileName}</span>
-                    <span class="status-badge waiting" id="badge-${jobId}">AI 排隊分析中...</span>
+                    <span class="status-badge waiting" id="badge-${jobId}">AI 分析中...</span>
                 </h3>
                 <div class="preview-box" id="preview-${jobId}">
                     <strong>任務 ID：</strong><code>${jobId}</code><br>
@@ -337,32 +331,8 @@
             resultsDiv.appendChild(card);
         }
 
-        // 🧠 核心雙軌控制中心
+        // 🧠 核心事件驅動中心
         function startSmartTracking(jobId) {
-            // 軌道一：優先建立 WebSocket 監聽
-            connectJobWebSocket(jobId);
-
-            // 軌道二：🔥 保險定時炸彈（設定 1000 毫秒 = 1 秒）
-            fallbackTimers[jobId] = setTimeout(() => {
-                const badge = document.getElementById(`badge-${jobId}`);
-                // 如果 1 秒到了，畫面依然在「排隊分析中...」，代表 WS 被丟包或延遲了，立刻啟動輪詢保險！
-                if (badge && badge.classList.contains('waiting') && !activeIntervals[jobId]) {
-                    console.warn(`⏳ [Fallback] 任務 ${jobId} 超過 1 秒未收到 WS 推播，切換至主動輪詢模式！`);
-                    badge.innerText = "AI 分析中 (已啟動輪詢保險)...";
-                    
-                    // 關閉可能已經卡住的 WS 連線
-                    if (activeSockets[jobId]) {
-                        activeSockets[jobId].close();
-                    }
-                    
-                    // 啟動主動輪詢
-                    startPollingFallback(jobId);
-                }
-            }, 1000);
-        }
-
-        // 🔗 軌道一：WebSocket 輕量監聽器
-        function connectJobWebSocket(jobId) {
             const ws = new WebSocket(`ws://localhost:8080/ws?job_id=${jobId}`);
             activeSockets[jobId] = ws;
 
@@ -370,78 +340,61 @@
                 try {
                     const resData = JSON.parse(event.data);
 
-                    // 🛑 情況 A：收到 Python 通知失敗
+                    // 🛑 情況 A：收到失敗訊號（或是補發回來的歷史失敗資料）
                     if (resData.status === 'failed' || resData.status === 'fail') {
-                        clearTimeout(fallbackTimers[jobId]); // 拆除炸彈
-                        renderFailure(jobId, "Python 處理異常");
+                        renderFailure(jobId, resData.error || "Python 處理異常");
                         ws.close();
                         return;
                     }
 
-                    // 🟢 情況 B：收到 Python 通知成功
-                    if (resData.status === 'success') {
-                        console.log(`⚡ [WebSocket] 秒殺通知成功！任務 ${jobId} 已完成。`);
-                        clearTimeout(fallbackTimers[jobId]); // 拆除炸彈
-                        ws.close();
+                    // 🟢 情況 B：不論是即時 Stream 推播，還是進網頁時 Go 從 `fetchJobResult` 撈出來的補發
+                    // 只要狀態是完工（或帶有渲染結構），立刻執行非同步黃金三部曲第二步：向 /status 請求大數據
+                    if (resData.status === 'success' || resData.char_zy) {
+                        console.log(`⚡ [WS 觸發] 捕獲完工訊號，準備向 /status 拉取完整內容。任務 ID: ${jobId}`);
+                        ws.close(); // 通知已安全收到，中斷管子釋放後端 Go 的暫存資源
                         
-                        // 收到狀態 success，立刻去拉取真正的數據
+                        // 叫醒前端，精準叫一次 /status 撈取大資料渲染畫面
                         fetchAndRenderResult(jobId);
                     }
                 } catch (err) {
-                    console.error("WS 訊息解析失敗，等待保險觸發", err);
+                    console.error("WS 訊息解析失敗", err);
                 }
             };
 
-            ws.onerror = () => {
-                // 如果 WS 一開始就連不上，不用等 1 秒，立刻拆除炸彈直接進輪詢
-                clearTimeout(fallbackTimers[jobId]);
-                if (!activeIntervals[jobId]) {
-                    console.log(`🔌 [WS 異常] 任務 ${jobId} 連線失敗，提早切換至輪詢保險。`);
-                    startPollingFallback(jobId);
-                }
+            ws.onclose = () => {
+                // 當後端主動 conn.Close() 時會觸發此處，代表系統運行非常安全健康。
+                console.log(`🔌 [WS 關閉] 任務 ${jobId} 的 WebSocket 通道安全關閉。`);
+            };
+
+            ws.onerror = async () => {
+                console.error(`💥 [WS 異常] 任務 ${jobId} 無法建立即時通道，啟動防禦性單次對帳。`);
+                // 唯一的防禦性兜底：如果連線那一秒剛好網路炸了，前端防禦性打一次 status 對帳，絕不陷入無腦輪詢！
+                fetchAndRenderResult(jobId);
             };
         }
 
-        // ⏱️ 軌道二：主動輪詢保險機制（每秒去敲一次門）
-        function startPollingFallback(jobId) {
-            activeIntervals[jobId] = setInterval(async () => {
-                try {
-                    const response = await fetch(`http://localhost:8080/status?job_id=${jobId}`);
-                    const resData = await response.json();
-
-                    // 狀況 A：仍在處理中，繼續等
-                    if (resData.status === 'processing') {
-                        console.log(`⏱️ [Polling] 任務 ${jobId} 仍在分析中...`);
-                        return;
-                    }
-
-                    // 狀況 B：失敗了
-                    if (resData.status === 'failed' || resData.status === 'fail') {
-                        clearInterval(activeIntervals[jobId]);
-                        renderFailure(jobId, resData.error || "未知錯誤");
-                        return;
-                    }
-
-                    // 狀況 C：成功了！直接拿結果渲染（因為 /status 本來就包含完整大資料）
-                    clearInterval(activeIntervals[jobId]);
-                    console.log(`🎉 [Polling] 輪詢成功捕獲結果！任務 ${jobId} 已渲染。`);
-                    renderSuccessHTML(jobId, resData);
-
-                } catch (err) {
-                    console.error(`輪詢任務 ${jobId} 發生網路錯誤:`, err);
-                }
-            }, 1000);
-        }
-
-        // 📥 獨立抽離：發起 HTTP GET 請求完整大數據並渲染
+        // 📥 非同步黃金三部曲第二步：發起 HTTP GET 請求完整大數據並渲染
         async function fetchAndRenderResult(jobId) {
             try {
                 const response = await fetch(`http://localhost:8080/status?job_id=${jobId}`);
                 const finalResult = await response.json();
+                
+                // 如果是防禦性對帳被觸發，且後端表示仍在排隊中，則維持卡片原狀不渲染
+                if (finalResult.status === 'processing') {
+                    console.warn(`⏳ 任務 ${jobId} 目前仍在 AI 隊列中，請等待重新整理或通知。`);
+                    return;
+                }
+
+                if (finalResult.status === 'failed' || finalResult.status === 'fail') {
+                    renderFailure(jobId, finalResult.error || "未知錯誤");
+                    return;
+                }
+
+                // 成功拿回大滿漢全席，直接擺盤渲染！
                 renderSuccessHTML(jobId, finalResult);
             } catch (fetchErr) {
                 console.error("HTTP GET 獲取大資料失敗:", fetchErr);
-                renderFailure(jobId, "資料載入失敗");
+                renderFailure(jobId, "連線中斷，請重新整理網頁");
             }
         }
 
@@ -453,17 +406,17 @@
             if (!badge) return;
 
             badge.className = 'status-badge success';
-            badge.innerText = '完成';
+            badge.innerText = '分析完成';
 
-            // 📥 注入動態漸層的 PDF 下載按鈕，直接呼叫 Go 網關
+            // 📥 注入動態漸層的 PDF 下載按鈕（非同步黃金三部曲第三步：直接呼叫 /download）
             preview.innerHTML = `
-                <strong>📄 文本摘要前瞻：</strong>${data.preview || '已順利完成注音標註'}<br><br>
+                <strong>📄 文本前瞻摘要：</strong>已順利解析完成，注音生字網格已渲染。<br><br>
                 <a href="http://localhost:8080/download?job_id=${jobId}" 
                    style="display:inline-flex; align-items:center; background: linear-gradient(135deg, #34d399 0%, #059669 100%); color:#0b0f19; padding:10px 20px; border-radius:10px; text-decoration:none; font-weight:700; font-size:0.9rem; margin-top:5px; box-shadow: 0 4px 15px rgba(52, 211, 153, 0.2); transition:all 0.2s ease;"
                    onmouseover="this.style.opacity=0.9; this.style.transform='translateY(-1px)'; this.style.boxShadow='0 6px 20px rgba(52, 211, 153, 0.4)';" 
                    onmouseout="this.style.opacity=1; this.style.transform='translateY(0)'; this.style.boxShadow='0 4px 15px rgba(52, 211, 153, 0.2)';"
                 >
-                   📥 下載完整注音 PDF
+                   📥 下載完整注音標註 PDF
                 </a>
             `;
 

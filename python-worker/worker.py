@@ -29,13 +29,14 @@ r_raw = redis.Redis(
     health_check_interval=30
 )
 
-JOB_QUEUE = "queue:job"
+QUEUE_KEY = "queue:job"
+STREAM_KEY = "stream:job"
 
 def worker_task(worker_id):
     print(f"Worker {worker_id} (PID: {os.getpid()}) starts")
     while True:
         try:
-            item = r_text.brpop([JOB_QUEUE], timeout=10)
+            item = r_text.brpop([QUEUE_KEY], timeout=10)
             if not item:
                 continue
             _, raw_job = item
@@ -50,14 +51,18 @@ def worker_task(worker_id):
                 result_data["pdf_path"] = pdf_path
                 json_bytes = json.dumps(result_data).encode('utf-8')
                 compressed_data = gzip.compress(json_bytes)
-                r_raw.set(RESULT_KEY, compressed_data, ex=3600)
-                r_text.publish('job_status_channel', json.dumps({'job_id': job.job_id, 'status': 'success'}))
+                pipe = r_raw.pipeline(transaction=False)
+                pipe.set(RESULT_KEY, compressed_data, ex=3600)
+                pipe.xadd(STREAM_KEY, {'job_id': job.job_id, 'status': 'success'})
+                pipe.execute()
                 print(f"{job.job_id} completed. The result is written back to Redis.")
             except Exception as exc:
                 error_payload = {"status": "failed", "error": str(exc)}
                 err_bytes = json.dumps(error_payload).encode('utf-8')
-                r_raw.set(RESULT_KEY, gzip.compress(err_bytes), ex=3600)
-                r_text.publish('job_status_channel', json.dumps({'job_id': job.job_id, 'status': 'fail'}))
+                pipe = r_raw.pipeline(transaction=False)
+                pipe.set(RESULT_KEY, gzip.compress(err_bytes), ex=3600)
+                pipe.xadd(STREAM_KEY, {'job_id': job.job_id, 'status': 'fail'})
+                pipe.execute()
                 print(f"{job.job_id} failed.")
                 traceback.print_exc()
         except Exception as queue_err:

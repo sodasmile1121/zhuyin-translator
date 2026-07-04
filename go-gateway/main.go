@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -19,6 +20,7 @@ import (
 )
 
 type Server struct {
+	id  string
 	rdb *redis.Client
 	ctx context.Context
 	hub *Hub
@@ -39,6 +41,10 @@ type ResultPayload struct {
 	PdfPath string `json:"pdf_path"`
 	Error   string `json:"error"`
 }
+
+const QueueKey = "queue:job"
+const StreamKey = "stream:job"
+const GroupName = "go-gateway-group"
 
 func saveFiles(files []*multipart.FileHeader) ([]string, error) {
 	dir := "./uploads"
@@ -111,33 +117,53 @@ func (h *Hub) Unregister(jobID string) {
 }
 
 func (s *Server) startRedisSub() {
-	pubsub := s.rdb.Subscribe(s.ctx, "job_status_channel")
-	ch := pubsub.Channel()
-
 	go func() {
-		for msg := range ch {
-			var data map[string]interface{}
-			if err := json.Unmarshal([]byte(msg.Payload), &data); err != nil {
-				continue
-			}
-			jobID, ok := data["job_id"].(string)
-			if !ok {
-				continue
-			}
-			s.hub.mux.RLock()
-			conn, exists := s.hub.connections[jobID]
-			s.hub.mux.RUnlock()
-
-			if exists {
-				err := conn.WriteMessage(websocket.TextMessage, []byte(msg.Payload))
-				if err != nil {
-					fmt.Printf("Failed to push notification to Job %s: %v\n", jobID, err)
-				} else {
-					fmt.Printf("Successfully pushed job %s completion message to frontend!\n", jobID)
+		err := s.rdb.XGroupCreateMkStream(s.ctx, StreamKey, GroupName, "$").Err()
+		if err != nil {
+			fmt.Println("Redis error:", err)
+		}
+		for {
+			streams, err := s.rdb.XReadGroup(s.ctx, &redis.XReadGroupArgs{
+				Group:    GroupName,
+				Consumer: s.id,
+				Streams:  []string{StreamKey, ">"},
+				Count:    1,
+				Block:    100 * time.Millisecond,
+			}).Result()
+			if err != nil {
+				if err == redis.Nil {
+					continue
 				}
-				s.hub.Unregister(jobID)
-			} else {
-				fmt.Printf("The websocket for job %s has not been established\n", jobID)
+				fmt.Println("Failed to read from stream:", err)
+			}
+			for _, stream := range streams {
+				for _, message := range stream.Messages {
+					jobID, ok := message.Values["job_id"].(string)
+					if !ok {
+						continue
+					}
+					payload, err := json.Marshal(message.Values)
+					if err != nil {
+						fmt.Println("Fail to marshal json:", err)
+						continue
+					}
+					s.hub.mux.RLock()
+					conn, exists := s.hub.connections[jobID]
+					s.hub.mux.RUnlock()
+					if exists {
+						err := conn.WriteMessage(websocket.TextMessage, []byte(payload))
+						if err != nil {
+							fmt.Printf("Failed to push notification to Job %s: %v\n", jobID, err)
+						} else {
+							s.rdb.XAck(s.ctx, StreamKey, GroupName, message.ID)
+							s.hub.Unregister(jobID)
+							fmt.Printf("Successfully pushed job %s completion message to frontend!\n", jobID)
+						}
+					} else {
+						s.rdb.XAck(s.ctx, StreamKey, GroupName, message.ID)
+						fmt.Printf("The websocket for job %s has not been established\n", jobID)
+					}
+				}
 			}
 		}
 	}()
@@ -162,6 +188,19 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	fmt.Printf("Frontend connnect Successfully to Go. Job %s is listening...\n", jobID)
 	s.hub.Register(jobID, conn)
+
+	go func() {
+		result, err := s.fetchJobResult(jobID)
+		if err == nil && len(result) > 0 {
+			err = conn.WriteMessage(websocket.TextMessage, result)
+			if err == nil {
+				fmt.Printf("Job %s finished during downtime. Notification auto-backfilled.", jobID)
+				conn.Close()
+			}
+			return
+		}
+	}()
+
 	go func() {
 		defer func() {
 			s.hub.Unregister(jobID)
@@ -198,7 +237,6 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := "queue:job"
 	var assignedJobs []JobInfo
 
 	for _, path := range paths {
@@ -211,7 +249,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Failed to create JSON payload", http.StatusInternalServerError)
 			return
 		}
-		err = s.rdb.LPush(s.ctx, key, jsonBytes).Err()
+		err = s.rdb.LPush(s.ctx, QueueKey, jsonBytes).Err()
 		if err != nil {
 			http.Error(w, "Failed to push tasks to Redis queue", http.StatusInternalServerError)
 			return
@@ -307,7 +345,7 @@ func main() {
 	)
 	ctx := context.Background()
 	hub := NewHub()
-	srv := &Server{rdb: rdb, ctx: ctx, hub: hub}
+	srv := &Server{id: "srv1", rdb: rdb, ctx: ctx, hub: hub}
 	srv.startRedisSub()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
