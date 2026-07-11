@@ -140,9 +140,23 @@ func (s *Server) startRedisSub() {
 					if !ok {
 						continue
 					}
+					status, ok := message.Values["status"].(string)
+					if !ok {
+						continue
+					}
+					output_path, ok := message.Values["output_path"].(string)
+					if !ok {
+						continue
+					}
 					payload, err := json.Marshal(message.Values)
 					if err != nil {
 						fmt.Println("Fail to marshal json:", err)
+						continue
+					}
+					query := `UPDATE jobs SET status=($1), s3_output_url=($2) WHERE job_id=($3);`
+					_, err = s.db.Exec(query, status, output_path, jobID)
+					if err != nil {
+						fmt.Println("Postgres UPDATE error:", err)
 						continue
 					}
 					s.hub.mux.RLock()

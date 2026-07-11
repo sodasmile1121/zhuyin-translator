@@ -68,19 +68,20 @@ def worker_task(worker_id):
                 s3_output_path = f"outputs/{job.job_id}_translated.pdf"
                 s3_client.upload_file(pdf_path, BUCKET_NAME, s3_output_path)
                 result_data["pdf_path"] = s3_output_path
+                result_data["error"] = ""
                 json_bytes = json.dumps(result_data).encode('utf-8')
                 compressed_data = gzip.compress(json_bytes)
                 pipe = r_raw.pipeline(transaction=False)
                 pipe.set(RESULT_KEY, compressed_data, ex=3600)
-                pipe.xadd(STREAM_KEY, {'job_id': job.job_id, 'status': 'success'})
+                pipe.xadd(STREAM_KEY, {'job_id': job.job_id, 'status': 'success', 'output_path': s3_output_path})
                 pipe.execute()
                 print(f"{job.job_id} completed. The result is written back to Redis.")
             except Exception as exc:
-                error_payload = {"status": "failed", "pdf_path": "", "error": str(exc)}
+                error_payload = {"status": "failed", "pdf_path": "", "error": str(exc), "preview": "", "char_zy": []}
                 err_bytes = json.dumps(error_payload).encode('utf-8')
                 pipe = r_raw.pipeline(transaction=False)
                 pipe.set(RESULT_KEY, gzip.compress(err_bytes), ex=3600)
-                pipe.xadd(STREAM_KEY, {'job_id': job.job_id, 'status': 'fail'})
+                pipe.xadd(STREAM_KEY, {'job_id': job.job_id, 'status': 'failed', 'output_path': ''})
                 pipe.execute()
                 print(f"{job.job_id} failed.")
                 traceback.print_exc()
