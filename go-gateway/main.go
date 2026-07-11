@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,7 +52,7 @@ type ResultPayload struct {
 	Error   string `json:"error"`
 }
 
-const QueueKey = "queue:job"
+const TaskStreamKey = "stream:task"
 const StreamKey = "stream:job"
 const GroupName = "go-gateway-group"
 
@@ -117,7 +118,7 @@ func (h *Hub) Unregister(jobID string) {
 func (s *Server) startRedisSub() {
 	go func() {
 		err := s.rdb.XGroupCreateMkStream(s.ctx, StreamKey, GroupName, "$").Err()
-		if err != nil {
+		if err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
 			fmt.Println("Redis error:", err)
 		}
 		for {
@@ -264,14 +265,19 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Failed to save job to database", http.StatusInternalServerError)
 			return
 		}
-		jsonBytes, err := json.Marshal(assignedJobs[i])
+
+		err = s.rdb.XAdd(s.ctx, &redis.XAddArgs{
+			Stream: TaskStreamKey,
+			ID:     "*",
+			Values: map[string]interface{}{
+				"job_id":    assignedJobs[i].JobID,
+				"file_path": assignedJobs[i].FilePath,
+			},
+		}).Err()
+
 		if err != nil {
-			http.Error(w, "Failed to create JSON payload", http.StatusInternalServerError)
-			return
-		}
-		err = s.rdb.LPush(s.ctx, QueueKey, jsonBytes).Err()
-		if err != nil {
-			http.Error(w, "Failed to push tasks to Redis queue", http.StatusInternalServerError)
+			fmt.Println("Redis XAdd error:", err)
+			http.Error(w, "Failed to push tasks to Redis stream", http.StatusInternalServerError)
 			return
 		}
 	}

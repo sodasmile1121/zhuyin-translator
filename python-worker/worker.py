@@ -5,6 +5,7 @@ import traceback
 import gzip
 import boto3
 import requests
+import time
 from models.job import PDFJob
 from multiprocessing import Process
 from processors.pipeline import process_file_task
@@ -38,34 +39,47 @@ s3_client = boto3.client(
     region_name=os.getenv('AWS_REGION')
 )
 BUCKET_NAME = os.getenv('AWS_S3_BUCKET')
-
-QUEUE_KEY = "queue:job"
+TASK_STREAM_KEY = "stream:task"
+TASK_GROUP_NAME = "python-worker-group"
 STREAM_KEY = "stream:job"
 
 def worker_task(worker_id):
-    print(f"Worker {worker_id} (PID: {os.getpid()}) starts")
+    consumer_name = f"worker-{worker_id}"
+    print(f"Worker {worker_id} (PID: {os.getpid()}) starts as {consumer_name}")
     while True:
         try:
-            item = r_text.brpop([QUEUE_KEY], timeout=10)
-            if not item:
+            response = r_text.xreadgroup(
+                groupname=TASK_GROUP_NAME,
+                consumername=consumer_name,
+                streams={TASK_STREAM_KEY: ">"},
+                count=1,
+                block=10000
+            )
+            if not response:
                 continue
-            _, raw_job = item
-            payload = json.loads(raw_job)
-            job = PDFJob(**payload)
-            RESULT_KEY = f"result:{job.job_id}"
-            print(f"Worker {worker_id} starts job {job.job_id}")
-            local_input_path = f"/tmp/{job.job_id}_input.pdf"
-            pdf_path = f"/tmp/{job.job_id}_output.pdf"
+            _, messages = response[0]
+            message_id, message_values = messages[0]
+            job_id = message_values.get("job_id")
+            file_path = message_values.get("file_path")
+            if not job_id or not file_path:
+                print(f"[{consumer_name}] Invalid message payload, acking to clear. ID: {message_id}")
+                r_text.xack(TASK_STREAM_KEY, TASK_GROUP_NAME, message_id)
+                continue
+
+            RESULT_KEY = f"result:{job_id}"
+            print(f"Worker {worker_id} starts job {job_id}")
+            local_input_path = f"/tmp/{job_id}_input.pdf"
+            pdf_path = f"/tmp/{job_id}_output.pdf"
             try:
                 print(f"Worker {worker_id} downloading input file via Presigned URL...")
-                response = requests.get(job.file_path, timeout=30)
+                response = requests.get(file_path, timeout=30)
                 if response.status_code != 200:
                     raise Exception(f"Failed to download input from S3, status code: {response.status_code}")
                 with open(local_input_path, "wb") as f:
                     f.write(response.content)
                 result_data = process_file_task(local_input_path) 
                 generate_zhuyin_pdf(pdf_path, result_data['char_zy'])
-                s3_output_path = f"outputs/{job.job_id}_translated.pdf"
+                s3_output_path = f"outputs/{job_id}_translated.pdf"
                 s3_client.upload_file(pdf_path, BUCKET_NAME, s3_output_path)
                 result_data["pdf_path"] = s3_output_path
                 result_data["error"] = ""
@@ -73,17 +87,19 @@ def worker_task(worker_id):
                 compressed_data = gzip.compress(json_bytes)
                 pipe = r_raw.pipeline(transaction=False)
                 pipe.set(RESULT_KEY, compressed_data, ex=3600)
-                pipe.xadd(STREAM_KEY, {'job_id': job.job_id, 'status': 'success', 'output_path': s3_output_path})
                 pipe.execute()
-                print(f"{job.job_id} completed. The result is written back to Redis.")
+                r_text.xadd(STREAM_KEY, {'job_id': job_id, 'status': 'success', 'output_path': s3_output_path})
+                r_text.xack(TASK_STREAM_KEY, TASK_GROUP_NAME, message_id)
+                print(f"{job_id} completed and ACKed.")
             except Exception as exc:
                 error_payload = {"status": "failed", "pdf_path": "", "error": str(exc), "preview": "", "char_zy": []}
                 err_bytes = json.dumps(error_payload).encode('utf-8')
                 pipe = r_raw.pipeline(transaction=False)
                 pipe.set(RESULT_KEY, gzip.compress(err_bytes), ex=3600)
-                pipe.xadd(STREAM_KEY, {'job_id': job.job_id, 'status': 'failed', 'output_path': ''})
                 pipe.execute()
-                print(f"{job.job_id} failed.")
+                r_text.xadd(STREAM_KEY, {'job_id': job_id, 'status': 'failed', 'output_path': ''})
+                r_text.xack(TASK_STREAM_KEY, TASK_GROUP_NAME, message_id)
+                print(f"{job_id} failed and ACKed.")
                 traceback.print_exc()
                 
             finally:
@@ -93,9 +109,18 @@ def worker_task(worker_id):
 
         except Exception as queue_err:
             print(f"Worker-{worker_id} abnormal queue connection : {queue_err}")
+            time.sleep(2)
 
 
 if __name__ == '__main__':
+    try:
+        r_text.xgroup_create(TASK_STREAM_KEY, TASK_GROUP_NAME, id="$", mkstream=True)
+        print(f"Consumer Group '{TASK_GROUP_NAME}' created successfully.")
+    except redis.exceptions.ResponseError as e:
+        if "BUSYGROUP" in str(e):
+            print(f"Consumer Group '{TASK_GROUP_NAME}' already exists. Skipping creation.")
+        else:
+            raise e
     num_workers = 3
     processes = []
 
