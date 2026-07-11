@@ -3,6 +3,8 @@ import json
 import os
 import traceback
 import gzip
+import boto3
+import requests
 from models.job import PDFJob
 from multiprocessing import Process
 from processors.pipeline import process_file_task
@@ -29,6 +31,14 @@ r_raw = redis.Redis(
     health_check_interval=30
 )
 
+s3_client = boto3.client(
+    's3',
+    aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+    aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+    region_name=os.getenv('AWS_REGION')
+)
+BUCKET_NAME = os.getenv('AWS_S3_BUCKET')
+
 QUEUE_KEY = "queue:job"
 STREAM_KEY = "stream:job"
 
@@ -44,11 +54,20 @@ def worker_task(worker_id):
             job = PDFJob(**payload)
             RESULT_KEY = f"result:{job.job_id}"
             print(f"Worker {worker_id} starts job {job.job_id}")
+            local_input_path = f"/tmp/{job.job_id}_input.pdf"
+            pdf_path = f"/tmp/{job.job_id}_output.pdf"
             try:
-                result_data = process_file_task(job.file_path) 
-                pdf_path = f"outputs/{job.job_id}.pdf"
+                print(f"Worker {worker_id} downloading input file via Presigned URL...")
+                response = requests.get(job.file_path, timeout=30)
+                if response.status_code != 200:
+                    raise Exception(f"Failed to download input from S3, status code: {response.status_code}")
+                with open(local_input_path, "wb") as f:
+                    f.write(response.content)
+                result_data = process_file_task(local_input_path) 
                 generate_zhuyin_pdf(pdf_path, result_data['char_zy'])
-                result_data["pdf_path"] = pdf_path
+                s3_output_path = f"outputs/{job.job_id}_translated.pdf"
+                s3_client.upload_file(pdf_path, BUCKET_NAME, s3_output_path)
+                result_data["pdf_path"] = s3_output_path
                 json_bytes = json.dumps(result_data).encode('utf-8')
                 compressed_data = gzip.compress(json_bytes)
                 pipe = r_raw.pipeline(transaction=False)
@@ -57,7 +76,7 @@ def worker_task(worker_id):
                 pipe.execute()
                 print(f"{job.job_id} completed. The result is written back to Redis.")
             except Exception as exc:
-                error_payload = {"status": "failed", "error": str(exc)}
+                error_payload = {"status": "failed", "pdf_path": "", "error": str(exc)}
                 err_bytes = json.dumps(error_payload).encode('utf-8')
                 pipe = r_raw.pipeline(transaction=False)
                 pipe.set(RESULT_KEY, gzip.compress(err_bytes), ex=3600)
@@ -65,6 +84,12 @@ def worker_task(worker_id):
                 pipe.execute()
                 print(f"{job.job_id} failed.")
                 traceback.print_exc()
+                
+            finally:
+                for path in [local_input_path, pdf_path]:
+                    if os.path.exists(path):
+                        os.remove(path)
+
         except Exception as queue_err:
             print(f"Worker-{worker_id} abnormal queue connection : {queue_err}")
 

@@ -12,10 +12,13 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -23,11 +26,13 @@ import (
 )
 
 type Server struct {
-	id  string
-	rdb *redis.Client
-	db  *sql.DB
-	ctx context.Context
-	hub *Hub
+	id         string
+	rdb        *redis.Client
+	db         *sql.DB
+	ctx        context.Context
+	hub        *Hub
+	s3Client   *s3.Client
+	bucketName string
 }
 
 type JobInfo struct {
@@ -50,53 +55,42 @@ const QueueKey = "queue:job"
 const StreamKey = "stream:job"
 const GroupName = "go-gateway-group"
 
-func saveFiles(files []*multipart.FileHeader) ([]string, error) {
-	dir := "./uploads"
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, err
-	}
+func (s *Server) uploadToS3(files []*multipart.FileHeader, jobs []JobInfo) ([]string, error) {
+	var s3Urls []string
 
-	var savePaths []string
-	success := false
+	presignClient := s3.NewPresignClient(s.s3Client)
 
-	defer func() {
-		if !success {
-			for _, path := range savePaths {
-				os.Remove(path)
-			}
-		}
-	}()
-
-	for _, fh := range files {
+	for i, fh := range files {
 		srcFile, err := fh.Open()
 		if err != nil {
 			return nil, err
 		}
 
-		newFileName := uuid.New().String() + "_" + fh.Filename
-		finalPath := filepath.Join(dir, newFileName)
-		dstFile, err := os.Create(finalPath)
+		defer srcFile.Close()
+		jobID := jobs[i].JobID
+		s3Key := "inputs/" + jobID + "_" + fh.Filename
+
+		_, err = s.s3Client.PutObject(s.ctx, &s3.PutObjectInput{
+			Bucket: aws.String(s.bucketName),
+			Key:    aws.String(s3Key),
+			Body:   srcFile,
+		})
 		if err != nil {
-			srcFile.Close()
-			return nil, err
+			return nil, fmt.Errorf("S3 upload failed: %w", err)
 		}
 
-		_, err = io.Copy(dstFile, srcFile)
+		presignedReq, err := presignClient.PresignGetObject(s.ctx, &s3.GetObjectInput{
+			Bucket: aws.String(s.bucketName),
+			Key:    aws.String(s3Key),
+		}, s3.WithPresignExpires(15*time.Minute))
 		if err != nil {
-			srcFile.Close()
-			dstFile.Close()
-			return nil, err
+			return nil, fmt.Errorf("failed to generate presigned url: %w", err)
 		}
-		srcFile.Close()
-		dstFile.Close()
-		absPath, err := filepath.Abs(finalPath)
-		if err != nil {
-			return nil, err
-		}
-		savePaths = append(savePaths, absPath)
+
+		s3Urls = append(s3Urls, presignedReq.URL)
 	}
-	success = true
-	return savePaths, nil
+
+	return s3Urls, nil
 }
 
 func NewHub() *Hub {
@@ -235,27 +229,28 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	paths, err := saveFiles(files)
+	var assignedJobs []JobInfo
+	for range files {
+		assignedJobs = append(assignedJobs, JobInfo{
+			JobID: uuid.New().String(),
+		})
+	}
+	s3Urls, err := s.uploadToS3(files, assignedJobs)
 	if err != nil {
 		http.Error(w, "Failed to save files to disk", http.StatusInternalServerError)
 		return
 	}
 
-	var assignedJobs []JobInfo
-
-	for _, path := range paths {
-		job := JobInfo{
-			JobID:    uuid.New().String(),
-			FilePath: path,
-		}
+	for i, path := range s3Urls {
+		assignedJobs[i].FilePath = path
 		query := `INSERT INTO jobs (job_id, status, s3_input_url) VALUES ($1, $2, $3);`
-		_, err = s.db.Exec(query, job.JobID, "pending", job.FilePath)
+		_, err = s.db.Exec(query, assignedJobs[i].JobID, "pending", assignedJobs[i].FilePath)
 		if err != nil {
 			fmt.Println("Postgres INSERT error:", err)
 			http.Error(w, "Failed to save job to database", http.StatusInternalServerError)
 			return
 		}
-		jsonBytes, err := json.Marshal(job)
+		jsonBytes, err := json.Marshal(assignedJobs[i])
 		if err != nil {
 			http.Error(w, "Failed to create JSON payload", http.StatusInternalServerError)
 			return
@@ -265,7 +260,6 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Failed to push tasks to Redis queue", http.StatusInternalServerError)
 			return
 		}
-		assignedJobs = append(assignedJobs, job)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -349,19 +343,40 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, http.StatusUnprocessableEntity)
 		return
 	}
-	physicalPath := filepath.Join("/app", payload.PdfPath)
-	if _, err := os.Stat(physicalPath); os.IsNotExist(err) {
-		http.Error(w, "Physical PDF file not found on disk", http.StatusNotFound)
+	presignClient := s3.NewPresignClient(s.s3Client)
+	presignedReq, err := presignClient.PresignGetObject(s.ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucketName),
+		Key:    aws.String(payload.PdfPath), // 傳入 S3 物件鍵
+	}, s3.WithPresignExpires(10*time.Minute))
+
+	if err != nil {
+		http.Error(w, "Failed to generate download URL", http.StatusInternalServerError)
 		return
 	}
 
-	fileName := filepath.Base(physicalPath)
-	w.Header().Set("Content-Type", "application/pdf")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fileName))
-	http.ServeFile(w, r, physicalPath)
+	http.Redirect(w, r, presignedReq.URL, http.StatusFound)
 }
 
+var s3Client *s3.Client
+var bucketName string
+
 func main() {
+	region := os.Getenv("AWS_REGION")
+	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
+	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+	bucketName = os.Getenv("AWS_S3_BUCKET")
+
+	cfg, err := config.LoadDefaultConfig(context.TODO(),
+		config.WithRegion(region),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")),
+	)
+	if err != nil {
+		log.Fatalf("Cannot initialize AWS config: %v", err)
+	}
+
+	s3Client = s3.NewFromConfig(cfg)
+	log.Println("AWS S3 is successfully initialized")
+
 	redisAddr := os.Getenv("REDIS_ADDR")
 	rdb := redis.NewClient(&redis.Options{
 		Addr: redisAddr,
@@ -383,7 +398,7 @@ func main() {
 	}
 	ctx := context.Background()
 	hub := NewHub()
-	srv := &Server{id: "srv1", rdb: rdb, db: db, ctx: ctx, hub: hub}
+	srv := &Server{id: "srv1", rdb: rdb, db: db, ctx: ctx, hub: hub, s3Client: s3Client, bucketName: bucketName}
 	srv.startRedisSub()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
