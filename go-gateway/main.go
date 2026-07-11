@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -16,12 +18,14 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/redis/go-redis/v9"
 )
 
 type Server struct {
 	id  string
 	rdb *redis.Client
+	db  *sql.DB
 	ctx context.Context
 	hub *Hub
 }
@@ -244,6 +248,13 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			JobID:    uuid.New().String(),
 			FilePath: path,
 		}
+		query := `INSERT INTO jobs (job_id, status, s3_input_url) VALUES ($1, $2, $3);`
+		_, err = s.db.Exec(query, job.JobID, "pending", job.FilePath)
+		if err != nil {
+			fmt.Println("Postgres INSERT error:", err)
+			http.Error(w, "Failed to save job to database", http.StatusInternalServerError)
+			return
+		}
 		jsonBytes, err := json.Marshal(job)
 		if err != nil {
 			http.Error(w, "Failed to create JSON payload", http.StatusInternalServerError)
@@ -287,16 +298,30 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resultData, err := s.fetchJobResult(jobID)
-	if err == redis.Nil {
+	if err == nil {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status": "processing", "message": "AI is still compiling..."}`))
-		return
-	} else if err != nil {
-		http.Error(w, `{"error": "Redis fetch error"}`, http.StatusInternalServerError)
+		w.Write(resultData)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
-	w.Write(resultData)
+	if err == redis.Nil {
+		var status string
+		query := "SELECT status FROM jobs WHERE job_id = $1;"
+		err := s.db.QueryRow(query, jobID).Scan(&status)
+
+		if err == sql.ErrNoRows {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error": "Job not found"}`))
+			return
+		} else if err != nil {
+			http.Error(w, `{"error": "Database error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"status": "%s", "message": "Job is currently %s"}`, status, status)
+		return
+	}
+	http.Error(w, `{"error": "Fetch error"}`, http.StatusInternalServerError)
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
@@ -343,9 +368,22 @@ func main() {
 		DB:   0,
 	},
 	)
+
+	pgDSN := os.Getenv("DATABASE_URL")
+	db, err := sql.Open("pgx", pgDSN)
+	if err != nil {
+		log.Fatalf("Fail to initiate Postgres: %v", err)
+	}
+
+	db.SetMaxOpenConns(100)
+	db.SetMaxIdleConns(50)
+
+	if err := db.Ping(); err != nil {
+		log.Fatalf("Fail to connect to Postgres: %v", err)
+	}
 	ctx := context.Background()
 	hub := NewHub()
-	srv := &Server{id: "srv1", rdb: rdb, ctx: ctx, hub: hub}
+	srv := &Server{id: "srv1", rdb: rdb, db: db, ctx: ctx, hub: hub}
 	srv.startRedisSub()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

@@ -5,6 +5,19 @@ networks:
     driver: bridge
 
 services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: u_translator
+      POSTGRES_PASSWORD: p_password123
+      POSTGRES_DB: translator_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - main-net
+
   redis:
     image: redis:7-alpine
     ports:
@@ -18,8 +31,10 @@ services:
       - "8080:8080"
     depends_on:
       - redis
+      - postgres
     environment:
       - REDIS_ADDR=redis:6379
+      - DATABASE_URL=postgres://u_translator:p_password123@postgres:5432/translator_db?sslmode=disable
     volumes:
       - shared-pdf:/app/outputs
       - shared-uploads:/app/uploads
@@ -98,3 +113,4 @@ volumes:
   shared-uploads:
   prometheus_data:
   grafana_data:
+  pgdata:
