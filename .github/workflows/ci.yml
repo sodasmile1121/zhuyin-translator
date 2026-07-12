@@ -1,37 +1,78 @@
-name: Python Worker CI
+name: Full System CI/CD
 
-# 💥 觸發時機：什麼時候要叫雲端電腦出來幹活？
 on:
   push:
-    branches: [ "feat/stream-queue", "master" ] # 當這兩個分支有 push 時
+    branches: [ "feat/stream-queue", "master" ]
   pull_request:
     branches: [ "master" ]
 
-# 🏗️ 實體任務：雲端電腦要做什麼？
 jobs:
   python-lint:
-    # 叫一台裝有最新 Ubuntu Linux 的雲端虛擬機出來
     runs-on: ubuntu-latest
 
     steps:
-    # Step 1: 把你在 GitHub 上的程式碼「複製（Checkout）」到這台雲端電腦上
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # Step 2: 在雲端電腦上安裝 Python 環境
     - name: Set up Python
-      uses: actions/checkout@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.10'
 
-    # Step 3: 安裝語法檢查工具 (flake8)
     - name: Install linting tools
       run: |
         python -m pip install --upgrade pip
         pip install flake8
 
-    # Step 4: 物理執行語法檢查！檢查你的 worker.py 有沒有低級錯誤
     - name: Run Lint Check
       run: |
-        # stop the build if there are Python syntax errors or undefined names
         flake8 python-worker/worker.py --count --select=E9,F63,F7,F82 --show-source --statistics
+
+  build-and-push-docker:
+    needs: python-lint
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and Push Docker Image
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: ./python-worker/Dockerfile
+        push: true
+        tags: |
+          ghcr.io/${{ github.repository }}/python-worker:latest
+          ghcr.io/${{ github.repository }}/python-worker:${{ github.sha }}
+
+  build-and-push-gateway:
+    needs: python-lint
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and Push Go Gateway Image
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: ./go-gateway/Dockerfile
+        push: true
+        tags: |
+          ghcr.io/${{ github.repository }}/go-gateway:latest
+          ghcr.io/${{ github.repository }}/go-gateway:${{ github.sha }}
