@@ -27,7 +27,7 @@ jobs:
     # Step 3: 安裝語法檢查工具 (flake8)
     - name: Install linting tools
       run: |
-        python -m pip upgrade pip
+        python -m pip install --upgrade pip
         pip install flake8
 
     # Step 4: 物理執行語法檢查！檢查你的 worker.py 有沒有低級錯誤
