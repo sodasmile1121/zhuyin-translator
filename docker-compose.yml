@@ -26,7 +26,7 @@ services:
       - main-net
 
   go-gateway:
-    build: ./go-gateway
+    image: ghcr.io/sodasmile1121/zhuyin-translator/go-gateway:latest
     ports:
       - "8080:8080"
     depends_on:
@@ -46,7 +46,7 @@ services:
       - main-net
 
   python-worker:
-    build: ./python-worker
+    image: ghcr.io/sodasmile1121/zhuyin-translator/python-worker:latest
     depends_on:
       - redis
     environment:

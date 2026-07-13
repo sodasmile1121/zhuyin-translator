@@ -92,7 +92,7 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          source: "docker-compose.yml"
+          source: "docker-compose.yml,prometheus/**,grafana/**"
           target: "/home/ubuntu/zhuyin-translator/"
 
       - name: Executing remote SSH commands to deploy
