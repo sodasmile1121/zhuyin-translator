@@ -495,5 +495,5 @@ func main() {
 	http.HandleFunc("/ws", srv.handleWebSocket)
 	http.HandleFunc("/download", srv.handleDownload)
 
-	log.Fatal(http.ListenAndServe(":8081", nil))
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
