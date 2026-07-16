@@ -28,6 +28,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// Define interface
 type JobRepository interface {
 	CreateJob(ctx context.Context, arg db.CreateJobParams) error
 	UpdateJobStatus(ctx context.Context, arg db.UpdateJobStatusParams) error
