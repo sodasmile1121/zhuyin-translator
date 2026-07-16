@@ -299,7 +299,7 @@
             const formData = new FormData(form);
 
             try {
-                const response = await fetch('http://localhost:8080/upload', {
+                const response = await fetch(`${window.location.origin}/upload`, {
                     method: 'POST',
                     body: formData
                 });
@@ -341,7 +341,8 @@
         }
 
         function startSmartTracking(jobId) {
-            const ws = new WebSocket(`ws://localhost:8080/ws?job_id=${jobId}`);
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws?job_id=${jobId}`);
             activeSockets[jobId] = ws;
 
             ws.onmessage = async (event) => {
@@ -372,7 +373,7 @@
 
         async function fetchAndRenderResult(jobId) {
             try {
-                const response = await fetch(`http://localhost:8080/status?job_id=${jobId}`);
+                const response = await fetch(`${window.location.origin}/status?job_id=${jobId}`);
                 const finalResult = await response.json();
                 
                 if (finalResult.status === 'processing') {
@@ -404,7 +405,7 @@
             // 📥 溫和高質感的下載按鈕
             preview.innerHTML = `
                 <strong>🌱 文本前瞻摘要：</strong>已順利解析完成，注音生字網格已渲染。<br><br>
-                <a href="http://localhost:8080/download?job_id=${jobId}" 
+                <a href="${window.location.origin}/download?job_id=${jobId}"
                    style="display:inline-flex; align-items:center; background: #059669; color:#ffffff; padding:12px 24px; border-radius:12px; text-decoration:none; font-weight:600; font-size:0.9rem; margin-top:5px; transition:all 0.2s ease;"
                    onmouseover="this.style.background='#047857'; this.style.transform='translateY(-1px)';" 
                    onmouseout="this.style.background='#059669'; this.style.transform='translateY(0)';"
