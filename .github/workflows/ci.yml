@@ -59,6 +59,10 @@ jobs:
       uses: actions/setup-go@v5
       with:
         go-version: '1.21'
+    - name: Download Go Dependencies
+      run: |
+        cd go-gateway
+        go mod download
     - name: golangci-lint
       uses: golangci/golangci-lint-action@v6
       with:
