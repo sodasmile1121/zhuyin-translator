@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id VARCHAR(255) PRIMARY KEY,
+    status VARCHAR(50) NOT NULL,
+    s3_input_url TEXT NOT NULL,
+    s3_output_url TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

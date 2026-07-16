@@ -44,6 +44,69 @@ TASK_GROUP_NAME = "python-worker-group"
 DLQ_STREAM_KEY = "stream:task:dlq"
 STREAM_KEY = "stream:job"
 
+
+def download_pdf_file(url: str, local_path: str):
+    print(f"[I/O Download] Downloading input file from S3: {url}...")
+    response = requests.get(url, timeout=30)
+    if response.status_code != 200:
+        raise Exception(f"Download failed with status: {response.status_code}")
+    with open(local_path, "wb") as f:
+        f.write(response.content)
+    print(f"[I/O Download] Download completed: {local_path}")
+
+def upload_pdf_to_s3(local_path: str, s3_path: str):
+    print(f"[I/O Upload] Uploading output {local_path} to S3 bucket {BUCKET_NAME} path {s3_path}...")
+    s3_client.upload_file(local_path, BUCKET_NAME, s3_path)
+    print(f"[I/O Upload] S3 Upload completed.")
+
+def save_result_cache(job_id: str, data: dict):
+    RESULT_KEY = f"result:{job_id}"
+    print(f"[I/O Redis] Saving compressed result cache to {RESULT_KEY}...")
+    
+    json_bytes = json.dumps(data).encode('utf-8')
+    compressed_data = gzip.compress(json_bytes)
+    
+    pipe = r_raw.pipeline(transaction=False)
+    pipe.set(RESULT_KEY, compressed_data, ex=3600)
+    pipe.execute()
+    print(f"[I/O Redis] Result cache written successfully.")
+
+def clean_temp_files(*paths):
+    for path in paths:
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+                print(f"[Cleanup] Safely removed temp file: {path}")
+            except Exception as e:
+                print(f"[Cleanup Warning] Failed to remove {path}: {e}")
+
+def run_translation_pipeline(input_path: str, output_path: str) -> dict:
+    print(f"[Engine] Core translation engine starting...")
+    result_data = process_file_task(input_path) 
+    print(f"[Engine] Core PDF rendering starting...")
+    generate_zhuyin_pdf(output_path, result_data['char_zy'])
+    return result_data
+
+def handle_single_job_logic(job_id: str, file_path: str) -> dict:
+    local_input = f"/tmp/{job_id}_input.pdf"
+    local_output = f"/tmp/{job_id}_output.pdf"
+    s3_output_path = f"outputs/{job_id}_translated.pdf"
+    
+    try:
+        download_pdf_file(file_path, local_input)
+        result_data = run_translation_pipeline(local_input, local_output)
+        upload_pdf_to_s3(local_output, s3_output_path)
+        result_data["pdf_path"] = s3_output_path
+        result_data["error"] = ""
+        save_result_cache(job_id, result_data)
+        return {
+            "status": "success", 
+            "s3_output_path": s3_output_path
+        }
+    finally:
+        clean_temp_files(local_input, local_output)
+
+
 def worker_task(worker_id):
     consumer_name = f"worker-{worker_id}"
     print(f"Worker {worker_id} (PID: {os.getpid()}) starts as {consumer_name}")
@@ -87,32 +150,9 @@ def worker_task(worker_id):
                     r_text.xack(TASK_STREAM_KEY, TASK_GROUP_NAME, message_id)
                     continue
 
-            RESULT_KEY = f"result:{job_id}"
-            print(f"Worker {worker_id} starts job {job_id}")
-            local_input_path = f"/tmp/{job_id}_input.pdf"
-            pdf_path = f"/tmp/{job_id}_output.pdf"
             try:
-                print(f"Worker {worker_id} downloading input file via Presigned URL...")
-                response = requests.get(file_path, timeout=30)
-                if response.status_code != 200:
-                    raise Exception(f"Failed to download input from S3, status code: {response.status_code}")
-                with open(local_input_path, "wb") as f:
-                    f.write(response.content)
-                result_data = process_file_task(local_input_path) 
-                generate_zhuyin_pdf(pdf_path, result_data['char_zy'])
-                s3_output_path = f"outputs/{job_id}_translated.pdf"
-                s3_client.upload_file(pdf_path, BUCKET_NAME, s3_output_path)
-
-                result_data["pdf_path"] = s3_output_path
-                result_data["error"] = ""
-                json_bytes = json.dumps(result_data).encode('utf-8')
-                compressed_data = gzip.compress(json_bytes)
-
-                pipe = r_raw.pipeline(transaction=False)
-                pipe.set(RESULT_KEY, compressed_data, ex=3600)
-                pipe.execute()
-
-                r_text.xadd(STREAM_KEY, {'job_id': job_id, 'status': 'success', 'output_path': s3_output_path})
+                job_res = handle_single_job_logic(job_id, file_path)
+                r_text.xadd(STREAM_KEY, {'job_id': job_id, 'status': 'success', 'output_path': job_res['s3_output_path']})
                 r_text.xack(TASK_STREAM_KEY, TASK_GROUP_NAME, message_id)
                 print(f"{job_id} completed and ACKed.")
 
@@ -138,17 +178,10 @@ def worker_task(worker_id):
                     })
                     error_payload = {"status": "failed", "pdf_path": "", "error": str(exc), "preview": "", "char_zy": []}
                     err_bytes = json.dumps(error_payload).encode('utf-8')
-                    pipe = r_raw.pipeline(transaction=False)
-                    pipe.set(RESULT_KEY, gzip.compress(err_bytes), ex=3600)
-                    pipe.execute()
+                    r_raw.set(f"result:{job_id}", gzip.compress(err_bytes), ex=3600)
                     r_text.xadd(STREAM_KEY, {'job_id': job_id, 'status': 'failed', 'output_path': ''})
                     r_text.xack(TASK_STREAM_KEY, TASK_GROUP_NAME, message_id)
                     print(f"{job_id} moved to DLQ and ACKed.")
-                
-            finally:
-                for path in [local_input_path, pdf_path]:
-                    if os.path.exists(path):
-                        os.remove(path)
 
         except Exception as queue_err:
             print(f"Worker-{worker_id} abnormal queue connection : {queue_err}")
