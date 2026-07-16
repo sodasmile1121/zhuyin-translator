@@ -1,5 +1,3 @@
-version: '3.8'
-
 networks:
   main-net:
     driver: bridge
