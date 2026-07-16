@@ -349,7 +349,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	jsonResponse, _ := json.Marshal(assignedJobs)
-	w.Write(jsonResponse)
+	if _, err := w.Write(jsonResponse); err != nil {
+		log.Println("Failed to write HTTP response:", err)
+	}
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -364,7 +366,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	resultData, err := s.queue.FetchResultCache(s.ctx, jobID)
 	if err == nil {
 		w.WriteHeader(http.StatusOK)
-		w.Write(resultData)
+		if _, err := w.Write(resultData); err != nil {
+			log.Println("Failed to write HTTP response:", err)
+		}
 		return
 	}
 
@@ -372,7 +376,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		status, err := s.repo.GetJobStatus(s.ctx, jobID)
 		if err == sql.ErrNoRows {
 			w.WriteHeader(http.StatusNotFound)
-			w.Write([]byte(`{"error": "Job not found"}`))
+			if _, err := w.Write([]byte(`{"error": "Job not found"}`)); err != nil {
+				log.Println("Failed to write HTTP response:", err)
+			}
 			return
 		} else if err != nil {
 			http.Error(w, `{"error": "Database error"}`, http.StatusInternalServerError)
