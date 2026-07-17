@@ -28,7 +28,13 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Define interface
+var corsGuard = struct {
+	sync.RWMutex
+	allowedOrigins map[string]bool
+}{
+	allowedOrigins: make(map[string]bool),
+}
+
 type JobRepository interface {
 	CreateJob(ctx context.Context, arg db.CreateJobParams) error
 	UpdateJobStatus(ctx context.Context, arg db.UpdateJobStatusParams) error
@@ -241,10 +247,39 @@ func (s *Server) startRedisSub() {
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	CheckOrigin:     func(r *http.Request) bool { return true },
+	CheckOrigin: func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		corsGuard.RLock()
+		allowed := corsGuard.allowedOrigins[origin]
+		corsGuard.RUnlock()
+
+		if allowed {
+			return true
+		}
+		log.Printf("WebSocket Rejected Origin: %s\n", origin)
+		return false
+	},
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		origin := r.Header.Get("Origin")
+		corsGuard.RLock()
+		allowed := corsGuard.allowedOrigins[origin]
+		corsGuard.RUnlock()
+
+		if allowed && origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	jobID := r.URL.Query().Get("job_id")
 	if jobID == "" {
 		http.Error(w, "Missing job_id query parameter", http.StatusBadRequest)
@@ -285,7 +320,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if !s.setCORS(w, r) {
+		return
+	}
 	err := r.ParseMultipartForm(32 << 20)
 	if err != nil {
 		http.Error(w, "Failed to parse data", http.StatusBadRequest)
@@ -355,7 +392,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if !s.setCORS(w, r) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	jobID := r.URL.Query().Get("job_id")
 	if jobID == "" {
@@ -393,7 +432,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if !s.setCORS(w, r) {
+		return
+	}
 	jobID := r.URL.Query().Get("job_id")
 	if jobID == "" {
 		http.Error(w, `{"error": "Missing job_id"}`, http.StatusBadRequest)
@@ -429,7 +470,54 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, downloadURL, http.StatusFound)
 }
 
+func setUpOrigins() {
+	originsEnv := os.Getenv("ALLOWED_ORIGINS")
+	corsGuard.Lock()
+	defer corsGuard.Unlock()
+	if originsEnv == "" {
+		corsGuard.allowedOrigins["http://localhost:8081"] = true
+		log.Println("CORS: No ALLOWED_ORIGINS env found, fallback to localhost:8081")
+	} else {
+		parts := strings.Split(originsEnv, ",")
+		for _, part := range parts {
+			trimmed := strings.TrimSpace(part)
+			if trimmed != "" {
+				corsGuard.allowedOrigins[trimmed] = true
+				log.Printf("CORS: Allowed origin registered -> %s\n", trimmed)
+			}
+		}
+	}
+}
+
+func (s *Server) setCORS(w http.ResponseWriter, r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin != "" {
+		corsGuard.RLock()
+		allowed := corsGuard.allowedOrigins[origin]
+		corsGuard.RUnlock()
+
+		if !allowed {
+			log.Printf("CORS Rejected Origin: %s\n", origin)
+			http.Error(w, "CORS Not Allowed", http.StatusForbidden)
+			return false
+		}
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+	} else {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+	}
+
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return false
+	}
+	return true
+}
+
 func main() {
+	setUpOrigins()
 	region := os.Getenv("AWS_REGION")
 	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
 	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
@@ -453,17 +541,25 @@ func main() {
 	})
 
 	pgDSN := os.Getenv("DATABASE_URL")
-	dbConn, err := sql.Open("pgx", pgDSN)
+	var dbConn *sql.DB
+	for i := 0; i < 6; i++ {
+		dbConn, err = sql.Open("pgx", pgDSN)
+		if err == nil {
+			err = dbConn.Ping()
+		}
+		if err == nil {
+			log.Println("Postgres connected successfully!")
+			break
+		}
+		log.Printf("Postgres is not ready yet (error: %v), retrying in 3s... (%d/6)\n", err, i+1)
+		time.Sleep(3 * time.Second)
+	}
 	if err != nil {
-		log.Fatalf("Fail to initiate Postgres: %v", err)
+		log.Fatalf("Fail to connect to Postgres after multiple retries: %v", err)
 	}
 
 	dbConn.SetMaxOpenConns(100)
 	dbConn.SetMaxIdleConns(50)
-
-	if err := dbConn.Ping(); err != nil {
-		log.Fatalf("Fail to connect to Postgres: %v", err)
-	}
 
 	ctx := context.Background()
 	hub := NewHub()
