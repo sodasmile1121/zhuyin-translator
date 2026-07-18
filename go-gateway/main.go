@@ -20,7 +20,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -519,13 +518,10 @@ func (s *Server) setCORS(w http.ResponseWriter, r *http.Request) bool {
 func main() {
 	setUpOrigins()
 	region := os.Getenv("AWS_REGION")
-	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
-	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
 	bucketName := os.Getenv("AWS_S3_BUCKET")
 
 	cfg, err := config.LoadDefaultConfig(context.TODO(),
 		config.WithRegion(region),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")),
 	)
 	if err != nil {
 		log.Fatalf("Cannot initialize AWS config: %v", err)

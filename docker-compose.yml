@@ -37,8 +37,7 @@ services:
       - ALLOWED_ORIGINS=http://localhost:8081,http://52.196.156.122:8081
       - AWS_REGION=ap-northeast-1
       - AWS_S3_BUCKET=${AWS_S3_BUCKET}
-      - AWS_ACCESS_KEY_ID=${GO_GATEWAY_AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${GO_GATEWAY_AWS_SECRET_ACCESS_KEY}
+
     volumes:
       - shared-pdf:/app/outputs
       - shared-uploads:/app/uploads
@@ -53,8 +52,7 @@ services:
       - REDIS_ADDR=redis:6379
       - AWS_REGION=ap-northeast-1
       - AWS_S3_BUCKET=${AWS_S3_BUCKET}
-      - AWS_ACCESS_KEY_ID=${PYTHON_WORKER_AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${PYTHON_WORKER_AWS_SECRET_ACCESS_KEY}
+
     volumes:
       - shared-pdf:/app/outputs
       - shared-uploads:/app/uploads
