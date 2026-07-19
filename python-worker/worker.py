@@ -12,7 +12,7 @@ from processors.pipeline import process_file_task
 from services.pdf_generator import generate_zhuyin_pdf
 
 
-redis_addr = os.getenv("REDIS_ADDR")
+redis_addr = os.getenv("REDIS_ADDR", "localhost:6379")
 redis_host, redis_port = redis_addr.split(":")
 redis_port = int(redis_port)
 

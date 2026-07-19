@@ -189,6 +189,10 @@ func (s *Server) startRedisSub() {
 				if err == redis.Nil {
 					continue
 				}
+				if strings.Contains(err.Error(), "closed") {
+					log.Println("Redis client closed, exiting subscription loop gracefully.")
+					return
+				}
 				log.Println("Failed to read from stream:", err)
 			}
 			for _, stream := range streams {
