@@ -24,7 +24,8 @@ export function uploadFunc() {
   const data = {
     files: http.file(testPDF, 'k6_test_file.pdf', 'application/pdf'),
   };
-  const res = http.post('http://localhost:8080/upload', data);
+  const host = __ENV.TARGET_URL || 'http://localhost:8080';
+  const res = http.post(`${host}/upload`, data);
   console.log(`Response status: ${res.status}`);
   sleep(0.5);
 }

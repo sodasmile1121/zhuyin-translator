@@ -23,7 +23,7 @@ export const options = {
 const testPDF = open('./test.pdf', 'b');
 
 export function lifeCycle () {
-  const host = 'http://localhost:8080';
+  const host = __ENV.TARGET_URL || 'http://localhost:8080';
 
   const uploadData = { files: http.file(testPDF, 'k6_file.pdf', 'application/pdf') };
   const uploadRes = http.post(`${host}/upload`, uploadData);
