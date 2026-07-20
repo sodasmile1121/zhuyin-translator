@@ -5,6 +5,7 @@ networks:
 services:
   postgres:
     image: postgres:15-alpine
+    user: "0:0"
     environment:
       POSTGRES_USER: u_translator
       POSTGRES_PASSWORD: p_password123
@@ -13,7 +14,7 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./postgres:/docker-entrypoint-initdb.d
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     networks:
       - main-net
 
