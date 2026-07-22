@@ -1,0 +1,126 @@
+networks:
+  main-net:
+    driver: bridge
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    user: "0:0"
+    environment:
+      POSTGRES_USER: u_translator
+      POSTGRES_PASSWORD: p_password123
+      POSTGRES_DB: translator_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - main-net
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - main-net
+
+  go-gateway:
+    image: ghcr.io/sodasmile1121/zhuyin-translator/go-gateway:latest
+    ports:
+      - "8081:8080"
+    depends_on:
+      - redis
+      - postgres
+    environment:
+      - REDIS_ADDR=redis:6379
+      - DATABASE_URL=postgres://u_translator:p_password123@postgres:5432/translator_db?sslmode=disable
+      - ALLOWED_ORIGINS=http://localhost:8081,http://43.206.156.180:8081
+      - AWS_REGION=ap-northeast-1
+      - AWS_S3_BUCKET=${AWS_S3_BUCKET}
+      - AWS_METADATA_SERVICE_TIMEOUT=2
+      - AWS_METADATA_SERVICE_NUM_ATTEMPTS=1
+
+    volumes:
+      - shared-pdf:/app/outputs
+      - shared-uploads:/app/uploads
+    networks:
+      - main-net
+
+  python-worker:
+    image: ghcr.io/sodasmile1121/zhuyin-translator/python-worker:latest
+    depends_on:
+      - redis
+    environment:
+      - REDIS_ADDR=redis:6379
+      - AWS_REGION=ap-northeast-1
+      - AWS_S3_BUCKET=${AWS_S3_BUCKET}
+      - AWS_METADATA_SERVICE_TIMEOUT=2
+      - AWS_METADATA_SERVICE_NUM_ATTEMPTS=1
+
+    volumes:
+      - shared-pdf:/app/outputs
+      - shared-uploads:/app/uploads
+    networks:
+      - main-net
+
+  prometheus:
+    image: prom/prometheus:v3.10.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-remote-write-receiver'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    networks:
+      - main-net
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    privileged: true
+    container_name: cadvisor
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command:
+      - "--docker_only=true"
+      - "--housekeeping_interval=5s"
+    networks:
+      - main-net
+
+  grafana:
+    image: grafana/grafana:12.4.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_USER=${ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    restart: unless-stopped
+    networks:
+      - main-net
+
+volumes:
+  shared-pdf:
+  shared-uploads:
+  prometheus_data:
+  grafana_data:
+  pgdata:

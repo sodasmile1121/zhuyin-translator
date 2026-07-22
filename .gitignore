@@ -9,3 +9,8 @@ env/
 Thumbs.db
 
 uploads/
+
+go-gateway/coverage.out
+python-worker/.coverage
+python-worker/htmlcov/
+python-worker/.pytest_cache/

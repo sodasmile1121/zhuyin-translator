@@ -3,48 +3,49 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI 生字注音分析系統 - 智慧併發版</title>
+    <title>AI 生字注音分析系統 - 清新智慧版</title>
     <style>
         :root {
-            --bg-main: #0b0f19;
-            --bg-card: #131a2c;
-            --bg-input: #1e293b;
-            --border-color: #334155;
-            --text-main: #f8fafc;
-            --text-muted: #94a3b8;
-            --primary-glow: linear-gradient(135deg, #818cf8 0%, #c084fc 100%);
-            --ruby-color: #38bdf8;
+            --bg-main: #f4f6f3;       /* 日系微冷淡淡綠灰 */
+            --bg-card: #ffffff;       /* 純白高質感卡片 */
+            --bg-input: #fafbfc;
+            --border-color: #e2e8f0;   /* 輕量級邊框 */
+            --text-main: #2d3748;     /* 溫和的深灰（比純黑優雅） */
+            --text-muted: #718096;    /* 舒適的中灰 */
+            --primary-glow: linear-gradient(135deg, #6ee7b7 0%, #3b82f6 100%); /* 輕薄荷到天藍 */
+            --ruby-color: #059669;    /* 護眼翡翠綠注音 */
+            --card-shadow: 0 10px 30px rgba(148, 163, 184, 0.08);
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             background-color: var(--bg-main);
             color: var(--text-main);
             min-height: 100vh;
-            padding: 50px 20px;
+            padding: 60px 20px;
             display: flex;
             flex-direction: column;
             align-items: center;
+            background-image: radial-gradient(#e2e8f0 1px, transparent 1px);
+            background-size: 20px 20px;
         }
 
         .container {
             width: 100%;
-            max-width: 800px;
+            max-width: 840px;
         }
 
         header {
             text-align: center;
-            margin-bottom: 45px;
+            margin-bottom: 40px;
         }
 
         header h1 {
-            font-size: 2.6rem;
+            font-size: 2.4rem;
             font-weight: 800;
-            background: linear-gradient(to right, #fff 30%, #a5b4fc 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+            color: #1a202c;
             margin-bottom: 12px;
             letter-spacing: -0.5px;
         }
@@ -54,35 +55,34 @@
             font-size: 1.05rem;
         }
 
-        /* 控制區塊 */
+        /* 上傳控制區塊 */
         .upload-card {
             background: var(--bg-card);
             padding: 35px;
-            border-radius: 20px;
+            border-radius: 24px;
             border: 1px solid var(--border-color);
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+            box-shadow: var(--card-shadow);
             margin-bottom: 35px;
         }
 
         .file-dropzone {
-            border: 2px dashed #475569;
-            padding: 45px 20px;
-            border-radius: 14px;
+            border: 2px dashed #cbd5e1;
+            padding: 50px 20px;
+            border-radius: 16px;
             text-align: center;
-            background: rgba(30, 41, 59, 0.4);
+            background: var(--bg-input);
             cursor: pointer;
             display: block;
-            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+            transition: all 0.25s ease;
         }
 
         .file-dropzone:hover {
-            border-color: #818cf8;
-            background: rgba(129, 140, 248, 0.06);
-            box-shadow: 0 0 20px rgba(129, 140, 248, 0.1);
+            border-color: #3b82f6;
+            background: rgba(59, 130, 246, 0.02);
         }
 
         .file-dropzone icon {
-            font-size: 2.5rem;
+            font-size: 2.8rem;
             display: block;
             margin-bottom: 15px;
         }
@@ -92,120 +92,127 @@
         }
 
         .file-dropzone strong {
-            color: #f1f5f9;
-            font-size: 1.1rem;
+            color: #1e293b;
+            font-size: 1.15rem;
+            display: block;
         }
 
         .file-dropzone span {
             color: var(--text-muted);
             font-size: 0.9rem;
             display: block;
-            margin-top: 5px;
+            margin-top: 8px;
         }
 
         .file-count-tip {
-            margin-top: 10px;
+            margin-top: 12px;
             font-size: 0.9rem;
-            color: #a78bfa;
+            color: #059669;
             font-weight: 600;
         }
 
         .btn-submit {
             display: block;
             width: 100%;
-            background: var(--primary-glow);
-            color: #0f172a;
+            background: #1e293b; /* 內斂的高級黑色按鈕 */
+            color: #ffffff;
             border: none;
-            padding: 15px;
-            font-size: 1.1rem;
-            font-weight: 700;
-            border-radius: 12px;
+            padding: 16px;
+            font-size: 1.05rem;
+            font-weight: 600;
+            border-radius: 14px;
             margin-top: 25px;
             cursor: pointer;
             transition: all 0.2s ease;
         }
 
         .btn-submit:hover {
-            opacity: 0.95;
-            box-shadow: 0 0 25px rgba(192, 132, 252, 0.4);
+            background: #0f172a;
             transform: translateY(-1px);
+            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.15);
         }
 
         /* 檔案處理區塊卡片 */
         .file-card {
             background: var(--bg-card);
-            padding: 35px;
-            border-radius: 20px;
+            padding: 30px;
+            border-radius: 24px;
             border: 1px solid var(--border-color);
-            margin-bottom: 30px;
-            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.2);
+            margin-bottom: 25px;
+            box-shadow: var(--card-shadow);
             animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1);
         }
 
         @keyframes slideUp {
-            from { opacity: 0; transform: translateY(15px); }
+            from { opacity: 0; transform: translateY(12px); }
             to { opacity: 1; transform: translateY(0); }
         }
 
         .file-card h3 {
-            font-size: 1.2rem;
-            color: #f1f5f9;
-            margin-bottom: 16px;
+            font-size: 1.15rem;
+            color: #1a202c;
+            margin-bottom: 18px;
             font-weight: 700;
-            border-left: 4px solid #818cf8;
-            padding-left: 12px;
             display: flex;
             justify-content: space-between;
             align-items: center;
         }
 
+        .file-name-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            max-width: 70%; /* 防止名字過長塞車 */
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
         /* 檔案狀態標籤 */
         .status-badge {
-            font-size: 0.85rem;
-            padding: 4px 12px;
-            border-radius: 20px;
+            font-size: 0.8rem;
+            padding: 5px 14px;
+            border-radius: 30px;
             font-weight: 600;
         }
         .status-badge.waiting {
-            background: rgba(234, 179, 8, 0.15);
-            color: #eab308;
-            border: 1px solid rgba(234, 179, 8, 0.3);
+            background: #fef08a;
+            color: #713f12;
             animation: pulse 1.5s infinite;
         }
         .status-badge.success {
-            background: rgba(34, 197, 94, 0.15);
-            color: #22c55e;
-            border: 1px solid rgba(34, 197, 94, 0.3);
+            background: #d1fae5;
+            color: #065f46;
         }
         .status-badge.failed {
-            background: rgba(239, 68, 68, 0.15);
-            color: #ef4444;
-            border: 1px solid rgba(239, 68, 68, 0.3);
+            background: #fee2e2;
+            color: #991b1b;
         }
 
         @keyframes pulse {
-            0% { opacity: 0.6; }
+            0% { opacity: 0.7; }
             50% { opacity: 1; }
-            100% { opacity: 0.6; }
+            100% { opacity: 0.7; }
         }
 
         .preview-box {
-            background: #1e293b;
-            padding: 14px 18px;
-            border-radius: 10px;
+            background: #f8fafc;
+            padding: 16px 20px;
+            border-radius: 14px;
             font-size: 0.95rem;
-            color: var(--text-muted);
-            margin-bottom: 25px;
-            border: 1px solid rgba(255,255,255,0.02);
+            color: #475569;
+            margin-bottom: 20px;
+            border: 1px solid #f1f5f9;
+            line-height: 1.6;
         }
         
-        .preview-box strong { color: #cbd5e1; }
+        .preview-box strong { color: #1e293b; }
 
         /* 注音網格 */
         .words-container {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(70px, 1fr));
-            gap: 14px;
+            grid-template-columns: repeat(auto-fill, minmax(75px, 1fr));
+            gap: 12px;
             margin-top: 15px;
         }
 
@@ -214,32 +221,34 @@
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            padding: 12px 8px;
-            background: rgba(255, 255, 255, 0.03);
-            border: 1px solid rgba(255, 255, 255, 0.05);
-            border-radius: 12px;
-            transition: all 0.2s ease;
+            padding: 14px 8px;
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 16px;
+            box-shadow: 0 2px 8px rgba(148, 163, 184, 0.03);
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
         }
         
         .word-badge:hover {
-            background: rgba(255, 255, 255, 0.07);
-            border-color: #475569;
-            transform: translateY(-3px);
+            border-color: #cbd5e1;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(148, 163, 184, 0.08);
         }
 
         ruby {
-            font-size: 2.2rem;
-            font-weight: 600;
-            color: #ffffff;
+            font-size: 2rem;
+            font-weight: 700;
+            color: #1e293b;
             ruby-position: over;
         }
 
         rt {
-            font-size: 0.75rem;
-            font-weight: 700;
+            font-size: 0.8rem;
+            font-weight: 600;
             color: var(--ruby-color);
-            padding-bottom: 6px;
-            letter-spacing: 1.5px;
+            padding-bottom: 4px;
+            letter-spacing: 2px;
+            font-family: "Bopomofo", -apple-system, sans-serif;
         }
     </style>
 </head>
@@ -254,9 +263,9 @@
         <div class="upload-card">
             <form id="uploadForm">
                 <label class="file-dropzone" id="dropzone">
-                    <icon>⚡</icon>
+                    <icon>🌱</icon>
                     <strong>點擊或拖曳 PDF 至此處</strong>
-                    <span>支援多檔案同時上傳、同步非同步排隊處理</span>
+                    <span>支援多檔案同時上傳、自動對帳與即時推播機制</span>
                     <div class="file-count-tip" id="fileCountTip"></div>
                     <input type="file" id="fileInput" name="files" multiple required accept="application/pdf">
                 </label>
@@ -273,8 +282,7 @@
         const fileCountTip = document.getElementById('fileCountTip');
         const resultsDiv = document.getElementById('results');
 
-        // 用來追蹤儲存所有正在執行的輪詢計時器，避免鬼影重疊
-        let activeIntervals = {};
+        let activeSockets = {};
 
         fileInput.onchange = () => {
             const count = fileInput.files.length;
@@ -284,118 +292,147 @@
         form.onsubmit = async (e) => {
             e.preventDefault(); 
             
-            // 清除前一次的所有舊計時器與舊畫面
-            Object.values(activeIntervals).forEach(clearInterval);
-            activeIntervals = {};
+            Object.values(activeSockets).forEach(ws => ws.close());
+            activeSockets = {};
             resultsDiv.innerHTML = '';
 
             const formData = new FormData(form);
 
             try {
-                // 1. 打向 Go 後端優化過後的 /upload 接口
-                const response = await fetch('http://localhost:8080/upload', {
+                const response = await fetch(`${window.location.origin}/upload`, {
                     method: 'POST',
                     body: formData
                 });
 
-                // 2. 拿到 Go 回傳的 []JobInfo 陣列
                 const jobList = await response.json();
-
-                if (!response.ok) {
-                    throw new Error(jobList.error || "後端派發任務失敗");
-                }
+                if (!response.ok) throw new Error(jobList.error || "後端派發任務失敗");
 
                 if (Array.isArray(jobList) && jobList.length > 0) {
-                    // 3. 為每一個任務在畫面上創建獨立的卡片骨架
                     jobList.forEach(job => {
                         createJobCard(job.job_id, job.file_path);
-                        // 4. 為該任務啟動專屬的獨立 Polling 機制
-                        startPolling(job.job_id);
+                        startSmartTracking(job.job_id);
                     });
                 }
-
             } catch (error) {
                 alert("上傳發生錯誤：" + error.message);
             }
         };
 
-        // 🏗️ 在畫面上先幫任務佔位子，展現排隊中動態
         function createJobCard(jobId, filePath) {
-            const fileName = filePath.split('/').pop().replace(/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}_/, '');
+            // 🎯 核心修復：使用 Regex 強行切除 S3 URL 的 ?X-Amz-Algorithm... 之後的所有恐怖參數，並且洗掉 UUID 前綴
+            let cleanName = filePath.split('/').pop().split('?')[0];
+            cleanName = cleanName.replace(/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}_/, '');
             
             const card = document.createElement('div');
             card.className = 'file-card';
-            card.id = `card-${jobId}`; // 用 ID 鎖定這張卡片
+            card.id = `card-${jobId}`; 
             card.innerHTML = `
                 <h3>
-                    <span>📄 ${fileName}</span>
-                    <span class="status-badge waiting" id="badge-${jobId}">AI 排隊分析中...</span>
+                    <span class="file-name-wrapper" title="${cleanName}">📄 ${cleanName}</span>
+                    <span class="status-badge waiting" id="badge-${jobId}">AI 分析中...</span>
                 </h3>
                 <div class="preview-box" id="preview-${jobId}">
                     <strong>任務 ID：</strong><code>${jobId}</code><br>
-                    <strong>儲存路徑：</strong><small style="font-family: monospace; color:#64748b;">${filePath}</small>
+                    <strong>儲存狀態：</strong><small style="color:#64748b;">已安全分發至雲端叢集</small>
                 </div>
                 <div class="words-container" id="words-${jobId}"></div>
             `;
             resultsDiv.appendChild(card);
         }
 
-        // ⏱️ 每個任務獨立擁有的輪詢時鐘
-        function startPolling(jobId) {
-            activeIntervals[jobId] = setInterval(async () => {
+        function startSmartTracking(jobId) {
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws?job_id=${jobId}`);
+            activeSockets[jobId] = ws;
+
+            ws.onmessage = async (event) => {
                 try {
-                    const response = await fetch(`http://localhost:8080/status?job_id=${jobId}`);
-                    const resData = await response.json();
+                    const resData = JSON.parse(event.data);
 
-                    const badge = document.getElementById(`badge-${jobId}`);
-                    const preview = document.getElementById(`preview-${jobId}`);
-                    const wordsContainer = document.getElementById(`words-${jobId}`);
-
-                    // 防禦性檢查：萬一使用者狂點導致卡片不小心不見了
-                    if (!badge) return;
-
-                    // 狀況 A：Python 還在算
-                    if (resData.status === 'processing') {
-                        console.log(`Job ${jobId} 仍在分析中...`);
+                    if (resData.status === 'failed' || resData.status === 'fail') {
+                        renderFailure(jobId, resData.error || "Python 處理異常");
+                        ws.close();
                         return;
                     }
 
-                    // 狀況 B：Python 回報這張單死掉了
-                    if (resData.status === 'failed') {
-                        clearInterval(activeIntervals[jobId]);
-                        badge.className = 'status-badge failed';
-                        badge.innerText = '分析失敗';
-                        preview.innerHTML += `<br><span style="color:#ef4444;">❌ 錯誤原因：${resData.error || '未知錯誤'}</span>`;
-                        return;
+                    if (resData.status === 'success' || resData.char_zy) {
+                        console.log(`⚡ [WS 觸發] 捕獲完工訊號，準備向 /status 拉取完整內容。任務 ID: ${jobId}`);
+                        ws.close(); 
+                        fetchAndRenderResult(jobId);
                     }
-
-                    // 狀況 C：這張單算完了！收割成果！
-                    clearInterval(activeIntervals[jobId]);
-                    badge.className = 'status-badge success';
-                    badge.innerText = '完成';
-
-                    // 更新預覽訊息
-                    preview.innerHTML = `<strong>📄 文本摘要前瞻：</strong>${resData.preview || '已順利完成注音標註'}`;
-
-                    // 渲染注音格子
-                    let wordsHTML = '';
-                    if (resData.char_zy && Array.isArray(resData.char_zy)) {
-                        resData.char_zy.forEach(item => {
-                            wordsHTML += `
-                                <div class="word-badge">
-                                    <ruby>${item.char}<rt>${item.zy || '&nbsp;'}</rt></ruby>
-                                </div>
-                            `;
-                        });
-                    } else {
-                        wordsHTML = '<p style="color:var(--text-muted); padding:10px;">Python 回傳資料格式不包含 char_zy</p>';
-                    }
-                    wordsContainer.innerHTML = wordsHTML;
-
                 } catch (err) {
-                    console.error(`輪詢 Job ${jobId} 時連線中斷:`, err);
+                    console.error("WS 訊息解析失敗", err);
                 }
-            }, 1000); // 每秒敲一次門
+            };
+
+            ws.onerror = async () => {
+                console.error(`💥 [WS 異常] 任務 ${jobId} 無法建立即時通道，啟動防禦性單次對帳。`);
+                fetchAndRenderResult(jobId);
+            };
+        }
+
+        async function fetchAndRenderResult(jobId) {
+            try {
+                const response = await fetch(`${window.location.origin}/status?job_id=${jobId}`);
+                const finalResult = await response.json();
+                
+                if (finalResult.status === 'processing') {
+                    console.warn(`⏳ 任務 ${jobId} 目前仍在 AI 隊列中，請等待重新整理或通知。`);
+                    return;
+                }
+
+                if (finalResult.status === 'failed' || finalResult.status === 'fail') {
+                    renderFailure(jobId, finalResult.error || "未知錯誤");
+                    return;
+                }
+
+                renderSuccessHTML(jobId, finalResult);
+            } catch (fetchErr) {
+                console.error("HTTP GET 獲取大資料失敗:", fetchErr);
+                renderFailure(jobId, "連線中斷，請重新整理網頁");
+            }
+        }
+
+        function renderSuccessHTML(jobId, data) {
+            const badge = document.getElementById(`badge-${jobId}`);
+            const preview = document.getElementById(`preview-${jobId}`);
+            const wordsContainer = document.getElementById(`words-${jobId}`);
+            if (!badge) return;
+
+            badge.className = 'status-badge success';
+            badge.innerText = '分析完成';
+
+            // 📥 溫和高質感的下載按鈕
+            preview.innerHTML = `
+                <strong>🌱 文本前瞻摘要：</strong>已順利解析完成，注音生字網格已渲染。<br><br>
+                <a href="${window.location.origin}/download?job_id=${jobId}"
+                   style="display:inline-flex; align-items:center; background: #059669; color:#ffffff; padding:12px 24px; border-radius:12px; text-decoration:none; font-weight:600; font-size:0.9rem; margin-top:5px; transition:all 0.2s ease;"
+                   onmouseover="this.style.background='#047857'; this.style.transform='translateY(-1px)';" 
+                   onmouseout="this.style.background='#059669'; this.style.transform='translateY(0)';"
+                >
+                   📥 下載完整注音標註 PDF
+                </a>
+            `;
+
+            if (data.char_zy && Array.isArray(data.char_zy)) {
+                wordsContainer.innerHTML = data.char_zy.map(item => `
+                    <div class="word-badge">
+                        <ruby>${item.char}<rt>${item.zy || '&nbsp;'}</rt></ruby>
+                    </div>
+                `).join('');
+            } else {
+                wordsContainer.innerHTML = '<p style="color:var(--text-muted); padding:10px;">無有效生字注音資料</p>';
+            }
+        }
+
+        function renderFailure(jobId, reason) {
+            const badge = document.getElementById(`badge-${jobId}`);
+            const preview = document.getElementById(`preview-${jobId}`);
+            if (!badge) return;
+
+            badge.className = 'status-badge failed';
+            badge.innerText = '分析失敗';
+            preview.innerHTML += `<br><span style="color:#b91c1c;">❌ 錯誤原因：${reason}</span>`;
         }
     </script>
 </body>
