@@ -371,9 +371,9 @@ Load testing scenarios and monitoring dashboards are currently under continuous 
 
 
 4. **Verify Application Status:**
-* **Web UI & API Gateway**: Open `http://localhost:8081` in your browser to test PDF uploads.
-* **Prometheus Metrics**: `http://localhost:9090`
-* **Grafana Dashboard**: `http://localhost:3000`
+* Web UI & API Gateway: Open `http://localhost:8081` in your browser to test PDF uploads.
+* Prometheus Metrics: `http://localhost:9090`
+* Grafana Dashboard: `http://localhost:3000`
 
 
 5. **Stop All Services:**
