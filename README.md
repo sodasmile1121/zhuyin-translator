@@ -6,6 +6,12 @@ The system decouples request handling from document processing using Redis Strea
 
 ---
 
+## Demo
+
+![App Demo](./docs/demo.gif)
+
+---
+
 ## Highlights
 
 ### Scalable Processing
