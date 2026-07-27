@@ -2,7 +2,7 @@ name: Full System CI/CD
 
 on:
   push:
-    branches: [ "feat/stream-queue", "master" ]
+    branches: [ "feat/stream-queue", "fix/cicd-and-observability", "master" ]
   pull_request:
     branches: [ "master" ]
 
@@ -145,4 +145,5 @@ jobs:
             cd /home/ubuntu/zhuyin-translator/
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             docker compose pull
+            docker compose down --remove-orphans
             docker compose up -d --remove-orphans
