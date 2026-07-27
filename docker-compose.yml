@@ -85,21 +85,17 @@ services:
       - main-net
 
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.49.1
-    privileged: true
+    image: gcr.io/cadvisor/cadvisor:v0.47.0 # 👈 降回最穩定的 0.47
     container_name: cadvisor
-    devices:
-      - /dev/kmsg:/dev/kmsg
+    privileged: true
+    ports:
+      - "8080:8080"
     volumes:
       - /:/rootfs:ro
-      - /var/run:/var/run:rw
+      - /var/run:/var/run:ro
       - /sys:/sys:ro
-      - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - /var/lib/docker/:/var/lib/docker:ro
-      - /var/run/docker.sock:/var/run/docker.sock:rw
-    command:
-      - "--housekeeping_interval=5s"
-      - "--disable_metrics=disk,diskIO,tcp,udp,percpu,sched" 
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - main-net
 
