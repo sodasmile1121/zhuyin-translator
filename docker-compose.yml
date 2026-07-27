@@ -49,6 +49,8 @@ services:
 
   python-worker:
     image: ghcr.io/sodasmile1121/zhuyin-translator/python-worker:latest
+    ports:
+      - "8000:8000"
     depends_on:
       - redis
     environment:
@@ -57,7 +59,7 @@ services:
       - AWS_S3_BUCKET=${AWS_S3_BUCKET}
       - AWS_METADATA_SERVICE_TIMEOUT=2
       - AWS_METADATA_SERVICE_NUM_ATTEMPTS=1
-
+      - PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus_multiproc_dir
     volumes:
       - shared-pdf:/app/outputs
       - shared-uploads:/app/uploads
@@ -85,7 +87,7 @@ services:
       - main-net
 
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.47.0 # 👈 降回最穩定的 0.47
+    image: gcr.io/cadvisor/cadvisor:v0.47.0
     container_name: cadvisor
     privileged: true
     ports:

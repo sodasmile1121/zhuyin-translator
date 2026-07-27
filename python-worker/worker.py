@@ -6,11 +6,19 @@ import gzip
 import boto3
 import requests
 import time
+import glob
 from models.job import PDFJob
 from multiprocessing import Process
 from processors.pipeline import process_file_task
 from services.pdf_generator import generate_zhuyin_pdf
+from prometheus_client import start_http_server, Counter, Histogram, CollectorRegistry
+from prometheus_client import multiprocess
 
+registry = CollectorRegistry()
+multiprocess.MultiProcessCollector(registry)
+
+JOB_PROCESSED_TOTAL = Counter('python_worker_jobs_total', 'Total jobs processed', ['status'])
+JOB_PROCESS_TIME = Histogram('python_worker_job_duration_seconds', 'Time spent processing job')
 
 redis_addr = os.getenv("REDIS_ADDR", "localhost:6379")
 redis_host, redis_port = redis_addr.split(":")
@@ -149,12 +157,15 @@ def worker_task(worker_id):
                     continue
 
             try:
-                job_res = handle_single_job_logic(job_id, file_path)
+                with JOB_PROCESS_TIME.time():
+                    job_res = handle_single_job_logic(job_id, file_path)
+                JOB_PROCESSED_TOTAL.labels(status='success').inc()
                 r_text.xadd(STREAM_KEY, {'job_id': job_id, 'status': 'success', 'output_path': job_res['s3_output_path']})
                 r_text.xack(TASK_STREAM_KEY, TASK_GROUP_NAME, message_id)
                 print(f"{job_id} completed and ACKed.")
 
             except Exception as exc:
+                JOB_PROCESSED_TOTAL.labels(status='failed').inc()
                 print(f"Job {job_id} encountered an error: {exc}")
                 traceback.print_exc()
                 
@@ -187,6 +198,20 @@ def worker_task(worker_id):
 
 
 if __name__ == '__main__':
+    prometheus_dir = os.environ.get('PROMETHEUS_MULTIPROC_DIR')
+    if prometheus_dir and os.path.exists(prometheus_dir):
+        for f in glob.glob(os.path.join(prometheus_dir, '*.db')):
+            try:
+                os.remove(f)
+            except Exception as e:
+                print(f"[Prometheus Cleanup Warning] {e}")
+
+    try:
+        start_http_server(8000, registry=registry)
+        print("[Prometheus] Main process started metrics server on port 8000 (Multi-process mode)")
+    except Exception as e:
+        print(f"[Prometheus Error] Failed to start metrics server: {e}")
+
     try:
         r_text.xgroup_create(TASK_STREAM_KEY, TASK_GROUP_NAME, id="$", mkstream=True)
         print(f"Consumer Group '{TASK_GROUP_NAME}' created successfully.")
@@ -195,6 +220,7 @@ if __name__ == '__main__':
             print(f"Consumer Group '{TASK_GROUP_NAME}' already exists. Skipping creation.")
         else:
             raise e
+
     num_workers = 3
     processes = []
 

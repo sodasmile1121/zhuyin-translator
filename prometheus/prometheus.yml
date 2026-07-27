@@ -5,3 +5,17 @@ scrape_configs:
   - job_name: 'docker'
     static_configs:
       - targets: ['172.17.0.1:9323']
+
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+
+  - job_name: 'go-gateway'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['go-gateway:8080']
+
+  - job_name: 'python-worker'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['python-worker:8000']
