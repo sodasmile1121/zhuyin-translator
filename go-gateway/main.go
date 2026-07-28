@@ -37,10 +37,19 @@ var (
 		},
 		[]string{"path", "status"},
 	)
+	httpRequestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "http_request_duration_seconds",
+			Help:    "HTTP request latency in seconds",
+			Buckets: prometheus.DefBuckets, // 預設 0.005s ~ 10s 的區間
+		},
+		[]string{"path"},
+	)
 )
 
 func init() {
 	prometheus.MustRegister(httpRequestsTotal)
+	prometheus.MustRegister(httpRequestDuration)
 }
 
 var corsGuard = struct {
@@ -548,6 +557,17 @@ func (s *Server) setCORS(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+func promMiddleware(path string, handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		handler(w, r)
+
+		duration := time.Since(start).Seconds()
+		httpRequestDuration.WithLabelValues(path).Observe(duration)
+	}
+}
+
 func main() {
 	setUpOrigins()
 	region := os.Getenv("AWS_REGION")
@@ -615,10 +635,10 @@ func main() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "./index.html")
 	})
-	http.HandleFunc("/upload", srv.handleUpload)
-	http.HandleFunc("/status", srv.handleStatus)
+	http.HandleFunc("/upload", promMiddleware("/upload", srv.handleUpload))
+	http.HandleFunc("/status", promMiddleware("/status", srv.handleStatus))
 	http.HandleFunc("/ws", srv.handleWebSocket)
-	http.HandleFunc("/download", srv.handleDownload)
+	http.HandleFunc("/download", promMiddleware("/download", srv.handleDownload))
 	http.Handle("/metrics", promhttp.Handler())
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
