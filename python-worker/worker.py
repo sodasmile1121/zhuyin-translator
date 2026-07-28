@@ -12,13 +12,14 @@ from multiprocessing import Process
 from processors.pipeline import process_file_task
 from services.pdf_generator import generate_zhuyin_pdf
 from prometheus_client import start_http_server, Counter, Histogram, CollectorRegistry
-from prometheus_client import multiprocess
+from prometheus_client import multiprocess, Gauge
 
 registry = CollectorRegistry()
 multiprocess.MultiProcessCollector(registry)
 
 JOB_PROCESSED_TOTAL = Counter('python_worker_jobs_total', 'Total jobs processed', ['status'])
 JOB_PROCESS_TIME = Histogram('python_worker_job_duration_seconds', 'Time spent processing job')
+ACTIVE_JOBS = Gauge('python_worker_active_jobs', 'Number of currently processing jobs')
 
 redis_addr = os.getenv("REDIS_ADDR", "localhost:6379")
 redis_host, redis_port = redis_addr.split(":")
@@ -157,6 +158,7 @@ def worker_task(worker_id):
                     continue
 
             try:
+                ACTIVE_JOBS.inc()
                 with JOB_PROCESS_TIME.time():
                     job_res = handle_single_job_logic(job_id, file_path)
                 JOB_PROCESSED_TOTAL.labels(status='success').inc()
@@ -191,6 +193,8 @@ def worker_task(worker_id):
                     r_text.xadd(STREAM_KEY, {'job_id': job_id, 'status': 'failed', 'output_path': ''})
                     r_text.xack(TASK_STREAM_KEY, TASK_GROUP_NAME, message_id)
                     print(f"{job_id} moved to DLQ and ACKed.")
+            finally:
+                ACTIVE_JOBS.dec()
 
         except Exception as queue_err:
             print(f"Worker-{worker_id} abnormal queue connection : {queue_err}")
