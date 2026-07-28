@@ -289,9 +289,27 @@ Current testing includes
 - End-to-end API validation
 - GitHub Actions automated CI
 
-The repository also contains k6 load testing scripts together with Prometheus and Grafana configuration for system observability.
+## Load Testing Results
 
-Load testing scenarios and monitoring dashboards are currently under continuous refinement.
+### Upload API Benchmark
+
+Tool: k6  
+Endpoint: `/upload`  
+Workload: Fixed VUs  
+Test Environment: AWS EC2 Deployment
+
+
+| Concurrent Users (VUs) | Avg Latency | P95 Latency | Throughput (req/s) | Error Rate |
+|---|---:|---:|---:|---:|
+| 10 | 85.5 ms | 98.77 ms | 9.20 req/s | 0.00% |
+| 50 | 88.37 ms | 116.11 ms | 45.85 req/s | 0.00% |
+| 100 | 91.12 ms | 123.95 ms | 91.04 req/s | 0.00% |
+| 200 | 107.16 ms | 200.32 ms | 179.59 req/s | 0.00% |
+| 500 | 306.31 ms | 989.09 ms | 380.24 req/s | 0.00% |
+| 1000 | 1.59 s | 2.48 s | 382.08 req/s | 0.00% |
+
+
+The upload endpoint maintained 0% error rate while scaling from 10 to 1000 concurrent users. 
 
 ---
 
