@@ -35,7 +35,7 @@ services:
     environment:
       - REDIS_ADDR=redis:6379
       - DATABASE_URL=postgres://u_translator:p_password123@postgres:5432/translator_db?sslmode=disable
-      - ALLOWED_ORIGINS=http://localhost:8081,http://54.238.97.97:8081
+      - ALLOWED_ORIGINS=http://localhost:8081,http://52.199.48.46:8081
       - AWS_REGION=ap-northeast-1
       - AWS_S3_BUCKET=${AWS_S3_BUCKET}
       - AWS_METADATA_SERVICE_TIMEOUT=2
