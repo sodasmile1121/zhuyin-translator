@@ -56,6 +56,12 @@ def download_pdf_file(url: str, local_path: str):
     print(f"[I/O Download] Downloading input file from S3: {url}...")
     response = requests.get(url, timeout=30)
     if response.status_code != 200:
+        print("========== S3 DOWNLOAD ERROR ==========")
+        print("Status:", response.status_code)
+        print("Response body:", response.text)
+        print("Response headers:", dict(response.headers))
+        print("URL:", url)
+        print("=======================================")
         raise Exception(f"Download failed with status: {response.status_code}")
     with open(local_path, "wb") as f:
         f.write(response.content)
