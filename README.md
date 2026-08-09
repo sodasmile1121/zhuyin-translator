@@ -279,25 +279,24 @@ This project implements several production-inspired backend patterns.
 | Multi-process Workers | ✓ |
 
 ---
+# Load Testing & System Benchmarks
 
-# Testing
+Current testing coverage includes:
+- Python & Go unit tests
+- End-to-end API integration tests (Full flow validation)
+- GitHub Actions automated CI workflow
+- k6 load, benchmark, and spike testing
 
-Current testing includes
+---
 
-- Python unit tests
-- Go unit tests
-- End-to-end API validation
-- GitHub Actions automated CI
+## 1. Upload API Ingestion Benchmark
 
-## Load Testing Results
+Evaluated Go Gateway upload throughput using fixed concurrent users submitting PDF payloads directly to `/upload`.
 
-### Upload API Benchmark
-
-Tool: k6  
-Endpoint: `/upload`  
-Workload: Fixed VUs  
-Test Environment: AWS EC2 Deployment
-
+* **Tool:** k6  
+* **Script:** `upload_benchmark.js`  
+* **Workload:** Fixed VUs (`duration: 2m`)  
+* **Environment:** AWS EC2 Deployment  
 
 | Concurrent Users (VUs) | Avg Latency | P95 Latency | Throughput (req/s) | Error Rate |
 |---|---:|---:|---:|---:|
@@ -306,11 +305,75 @@ Test Environment: AWS EC2 Deployment
 | 100 | 91.12 ms | 123.95 ms | 91.04 req/s | 0.00% |
 | 200 | 107.16 ms | 200.32 ms | 179.59 req/s | 0.00% |
 | 500 | 306.31 ms | 989.09 ms | 380.24 req/s | 0.00% |
-| 1000 | 1.59 s | 2.48 s | 382.08 req/s | 0.00% |
+| 1,000 | 1.59 s | 2.48 s | 382.08 req/s | 0.00% |
 
+> **Key Finding:** Ingestion throughput scales linearly up to **200 VUs**, after which it saturates at **~380 req/s** (500–1,000 VUs). P95 latency increases past 500 VUs (~989 ms → 2.48 s), signaling Gateway CPU/bandwidth bounds without incurring HTTP connection drops (0.00% error rate).
 
-The upload endpoint maintained 0% error rate while scaling from 10 to 1000 concurrent users. 
+---
 
+## 2. End-to-End Lifecycle Benchmark (Fixed VUs)
+
+Evaluated complete workflow performance (`Upload -> Poll Status -> Worker Processing -> Download`) across low-to-medium concurrency levels.
+
+* **Tool:** k6  
+* **Script:** `mixed_life_cycle_benchmark.js`  
+* **Workload:** Fixed VUs (`maxRetries: 60`)  
+* **Environment:** AWS EC2 Deployment  
+
+| Concurrent Users (VUs) | Avg E2E Time | P95 E2E Time | Worker Throughput | Success Rate |
+|---|---:|---:|---:|---:|
+| 10 | 1.77 s | 1.77 s | 5.61 ops/s | 100.00% |
+| 20 | 2.51 s | 2.82 s | 7.90 ops/s | 100.00% |
+| 50 | 6.15 s | 7.11 s | 7.95 ops/s | 100.00% |
+| 100 | 12.06 s | 13.37 s | 7.93 ops/s | 100.00% |
+
+> **Key Finding:** Worker execution capacity saturates at **~8 ops/s** beyond 20 VUs. Excess incoming traffic is safely buffered inside Redis Streams; the system trades queueing dwell time (E2E latency) to ensure service availability.
+
+---
+
+## 3. Breakpoint & System Resilience Test
+
+Evaluated system execution limits and queue resilience by ramping traffic step-by-step up to **1,000 concurrent VUs**.
+
+* **Tool:** k6  
+* **Script:** `breakingpoint_test.js`  
+* **Test Profile:** Stage Ramp-up (0 → 1,000 VUs over 2m10s)  
+* **Environment:** AWS EC2 Deployment  
+
+| Key Metric | Measured Value | Analysis & Architectural Insights |
+| :--- | ---: | :--- |
+| **Check Success Rate** | **100.00%** (87,142 / 87,142) | All completed status polling and payload checks succeeded without application drops. |
+| **HTTP Error Rate** | **0.00%** (0 / 87,142 reqs) | Go Gateway maintained 0% HTTP request failures under 1,000 VUs. |
+| **HTTP P95 Latency** | **51.11 ms** | API Gateway response time remained fast (<60ms) during status polling pressure. |
+| **E2E Duration Range** | **1.74s (Min) → 1m17s (P95)** | Queue dwell time scaled naturally with concurrency while maintaining complete job processing integrity. |
+
+---
+
+## 4. Spike & Drain Test
+
+System telemetry captured during the **Spike & Drain Scenario** (`mixed_life_cycle_baseline.js`: 200 VU Warm-up → 1,000 VU Surge → 0 VU Queue Drain).
+
+| Key Metric | Measured Value |
+| :--- | ---: |
+| **Peak Concurrent VUs** | **1,000** |
+| **HTTP Throughput** | **543.6 req/s** |
+| **HTTP P95 Latency** | **210.54 ms** |
+| **Completed Iterations** | **1,951** |
+| **HTTP Request Failures** | **3 / 163,070** |
+
+> **Observation:** The 3 HTTP request failures were intermittent **S3 download timeouts** observed during the high-concurrency phase. The upload and status-check paths remained stable, with the failures isolated to the downstream download step.
+
+| **System & Gateway Performance** | **Worker & Hardware Resources** |
+| :---: | :---: |
+| ![API QPS & Status](./docs/images/grafana_qps_status.png)<br>*API QPS & HTTP Status Distribution* | ![Gateway Resources](./docs/images/grafana_gateway_latency.png)<br>*Gateway Latency (P95) & Active Goroutines* |
+| ![Worker Processing](./docs/images/grafana_worker_throughput.png)<br>*Worker Job Execution Rate & Duration* | ![EC2 Resources](./docs/images/grafana_ec2_resources.png)<br>*EC2 CPU & Memory Utilization* |
+
+#### Observability & Architectural Takeaways:
+
+* **Surge Absorption & Backpressure:** Asynchronous queueing via Redis Streams successfully buffered sudden 1,000-VU traffic bursts, preventing worker CPU exhaustion from crashing the web gateway.
+* **Worker Queue Clearance:** Worker throughput sustained a steady **~8 ops/s** during peak load and continued processing at maximum capacity throughout the Drain Phase (0 VU) until the queue was empty.
+* **Gateway Resource Efficiency:** The Go Gateway managed **~1,000 active goroutines** while maintaining a lightweight **Heap Allocation of ~30 MiB** and GC pause times **< 600 µs**.
+* **Bottleneck Identification:** CPU utilization reached **~180%** on the dual-core EC2 instance during processing, confirming image transformation in Python workers as the system's primary CPU-bound bottleneck.
 ---
 
 # Project Structure
