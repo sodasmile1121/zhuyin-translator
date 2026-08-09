@@ -35,7 +35,7 @@ services:
     environment:
       - REDIS_ADDR=redis:6379
       - DATABASE_URL=postgres://u_translator:p_password123@postgres:5432/translator_db?sslmode=disable
-      - ALLOWED_ORIGINS=http://localhost:8081,http://35.78.91.219:8081
+      - ALLOWED_ORIGINS=http://localhost:8081,http://52.199.48.46:8081
       - AWS_REGION=ap-northeast-1
       - AWS_S3_BUCKET=${AWS_S3_BUCKET}
       - AWS_METADATA_SERVICE_TIMEOUT=2
@@ -49,6 +49,8 @@ services:
 
   python-worker:
     image: ghcr.io/sodasmile1121/zhuyin-translator/python-worker:latest
+    ports:
+      - "8000:8000"
     depends_on:
       - redis
     environment:
@@ -57,7 +59,7 @@ services:
       - AWS_S3_BUCKET=${AWS_S3_BUCKET}
       - AWS_METADATA_SERVICE_TIMEOUT=2
       - AWS_METADATA_SERVICE_NUM_ATTEMPTS=1
-
+      - PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus_multiproc_dir
     volumes:
       - shared-pdf:/app/outputs
       - shared-uploads:/app/uploads
@@ -85,20 +87,17 @@ services:
       - main-net
 
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.49.1
-    privileged: true
+    image: gcr.io/cadvisor/cadvisor:v0.47.0
     container_name: cadvisor
-    devices:
-      - /dev/kmsg:/dev/kmsg
+    privileged: true
+    ports:
+      - "8080:8080"
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    command:
-      - "--docker_only=true"
-      - "--housekeeping_interval=5s"
     networks:
       - main-net
 

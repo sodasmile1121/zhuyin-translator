@@ -24,8 +24,33 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 )
+
+var (
+	httpRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "http_requests_total",
+			Help: "Total number of HTTP requests processed",
+		},
+		[]string{"path", "status"},
+	)
+	httpRequestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "http_request_duration_seconds",
+			Help:    "HTTP request latency in seconds",
+			Buckets: prometheus.DefBuckets, // 預設 0.005s ~ 10s 的區間
+		},
+		[]string{"path"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(httpRequestsTotal)
+	prometheus.MustRegister(httpRequestDuration)
+}
 
 var corsGuard = struct {
 	sync.RWMutex
@@ -323,11 +348,18 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
+	statusCode := "200"
+	defer func() {
+		httpRequestsTotal.WithLabelValues("/upload", statusCode).Inc()
+	}()
+
 	if !s.setCORS(w, r) {
+		statusCode = "403"
 		return
 	}
 	err := r.ParseMultipartForm(32 << 20)
 	if err != nil {
+		statusCode = "400"
 		http.Error(w, "Failed to parse data", http.StatusBadRequest)
 		return
 	}
@@ -335,6 +367,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	files := r.MultipartForm.File["files"]
 	for _, fh := range files {
 		if fh.Header.Get("Content-Type") != "application/pdf" {
+			statusCode = "400"
 			http.Error(w, fmt.Sprintf("%s is not a pdf file", fh.Filename), http.StatusBadRequest)
 			return
 		}
@@ -347,6 +380,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 		srcFile, err := fh.Open()
 		if err != nil {
+			statusCode = "500"
 			http.Error(w, "Failed to open file", http.StatusInternalServerError)
 			return
 		}
@@ -354,12 +388,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		err = s.storage.UploadFile(s.ctx, srcFile, s3Key)
 		srcFile.Close()
 		if err != nil {
+			statusCode = "500"
 			http.Error(w, "Failed to upload to S3", http.StatusInternalServerError)
 			return
 		}
 
 		presignedURL, err := s.storage.GeneratePresignedURL(s.ctx, s3Key, 15*time.Minute)
 		if err != nil {
+			statusCode = "500"
 			http.Error(w, "Failed to generate presigned URL", http.StatusInternalServerError)
 			return
 		}
@@ -370,12 +406,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			S3InputUrl: presignedURL,
 		})
 		if err != nil {
+			statusCode = "500"
 			http.Error(w, "Failed to save job to DB", http.StatusInternalServerError)
 			return
 		}
 
 		err = s.queue.PublishTask(s.ctx, jobID, presignedURL)
 		if err != nil {
+			statusCode = "500"
 			http.Error(w, "Failed to publish task to queue", http.StatusInternalServerError)
 			return
 		}
@@ -519,6 +557,17 @@ func (s *Server) setCORS(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+func promMiddleware(path string, handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		handler(w, r)
+
+		duration := time.Since(start).Seconds()
+		httpRequestDuration.WithLabelValues(path).Observe(duration)
+	}
+}
+
 func main() {
 	setUpOrigins()
 	region := os.Getenv("AWS_REGION")
@@ -586,10 +635,10 @@ func main() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "./index.html")
 	})
-	http.HandleFunc("/upload", srv.handleUpload)
-	http.HandleFunc("/status", srv.handleStatus)
+	http.HandleFunc("/upload", promMiddleware("/upload", srv.handleUpload))
+	http.HandleFunc("/status", promMiddleware("/status", srv.handleStatus))
 	http.HandleFunc("/ws", srv.handleWebSocket)
-	http.HandleFunc("/download", srv.handleDownload)
-
+	http.HandleFunc("/download", promMiddleware("/download", srv.handleDownload))
+	http.Handle("/metrics", promhttp.Handler())
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
