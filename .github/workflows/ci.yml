@@ -2,9 +2,18 @@ name: Full System CI/CD
 
 on:
   push:
-    branches: [ "feat/stream-queue", "fix/cicd-and-observability", "master" ]
+    branches: [ "master" ]
   pull_request:
     branches: [ "master" ]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (leave empty to deploy the commit being built)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
 
 jobs:
   python-lint:
@@ -26,7 +35,7 @@ jobs:
 
     - name: Run Lint Check
       run: |
-        flake8 python-worker/worker.py --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 python-worker --exclude venv,.venv --count --select=E9,F63,F7,F82 --show-source --statistics
 
   python-test:
     needs: python-lint
@@ -46,6 +55,10 @@ jobs:
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
         pip install pytest
 
+    - name: Run tests
+      working-directory: python-worker
+      run: python -m pytest -q
+
   go-lint:
     runs-on: ubuntu-latest
     steps:
@@ -56,22 +69,49 @@ jobs:
       with:
         go-version: '1.25'
         cache: true
+        cache-dependency-path: go-gateway/go.sum
 
-    - name: Download dependencies
+    - name: Download and verify dependencies
+      working-directory: go-gateway
+      run: |
+        go mod download
+        go mod verify
+
+    - name: Check that go.mod and go.sum are tidy
       working-directory: go-gateway
       run: |
         go mod tidy
-        go mod download
+        git diff --exit-code -- go.mod go.sum
 
-    - name: Run golangci-lint via Go 1.25
+    - name: Run golangci-lint (pinned version)
       working-directory: go-gateway
       run: |
-        go run github.com/golangci/golangci-lint/cmd/golangci-lint@latest run
+        go run github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8 run
+
+  go-test:
+    needs: go-lint
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go 1.25
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+        cache: true
+        cache-dependency-path: go-gateway/go.sum
+
+    - name: Run tests
+      working-directory: go-gateway
+      run: go test -race ./...
 
   build-and-push-worker:
-    needs: python-lint
+    needs: [python-lint, python-test]
     runs-on: ubuntu-latest
-    
+    permissions:
+      contents: read
+      packages: write
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -88,14 +128,17 @@ jobs:
       with:
         context: ./python-worker
         file: ./python-worker/Dockerfile
-        push: true
+        push: ${{ github.event_name != 'pull_request' }}
         tags: |
           ghcr.io/${{ github.repository }}/python-worker:latest
           ghcr.io/${{ github.repository }}/python-worker:${{ github.sha }}
 
   build-and-push-gateway:
-    needs: go-lint
+    needs: [go-lint, go-test]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -112,7 +155,7 @@ jobs:
       with:
         context: ./go-gateway
         file: ./go-gateway/Dockerfile
-        push: true
+        push: ${{ github.event_name != 'pull_request' }}
         tags: |
           ghcr.io/${{ github.repository }}/go-gateway:latest
           ghcr.io/${{ github.repository }}/go-gateway:${{ github.sha }}
@@ -120,19 +163,26 @@ jobs:
   deploy:
     name: Deploy to AWS EC2
     needs: [build-and-push-gateway, build-and-push-worker]
+    if: vars.DEPLOY_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master'))
     runs-on: ubuntu-latest
-    
+    permissions:
+      contents: read
+      packages: read
+    concurrency:
+      group: deploy-ec2
+      cancel-in-progress: false
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Copy docker-compose.yml to EC2
+      - name: Copy deployment files to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          source: "docker-compose.yml,prometheus/**,grafana/**"
+          source: "docker-compose.yml,init.sql,prometheus/**,grafana/**"
           target: "/home/ubuntu/zhuyin-translator/"
 
       - name: Executing remote SSH commands to deploy
@@ -142,8 +192,28 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
+            set -e
             cd /home/ubuntu/zhuyin-translator/
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            # Record which image tag is deployed so that later manual `docker compose` runs use it too.
+            touch .env
+            grep -v '^IMAGE_TAG=' .env > .env.tmp || true
+            echo "IMAGE_TAG=${{ inputs.image_tag || github.sha }}" >> .env.tmp
+            mv .env.tmp .env
+
             docker compose pull
-            docker compose down --remove-orphans
             docker compose up -d --remove-orphans
+
+            # Smoke test: the gateway must answer within about a minute, otherwise fail the deployment.
+            for i in $(seq 1 30); do
+              if curl -fsS -o /dev/null http://localhost:8081/; then
+                echo "gateway is up"
+                exit 0
+              fi
+              sleep 2
+            done
+            echo "gateway did not become healthy"
+            docker compose ps
+            docker compose logs --tail=50 go-gateway
+            exit 1
