@@ -26,7 +26,6 @@ def generate_zhuyin_pdf(pdf_path, result_data):
     spacing_word = 8
     
     current_x = margin_left
-    print(f"result_data: {result_data}")
     if not result_data or not result_data[0]:
         print("The result data is empty\n")
         return
