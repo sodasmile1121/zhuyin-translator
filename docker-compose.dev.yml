@@ -1,0 +1,7 @@
+# Overlay for building the app images from the local source instead of pulling them from GHCR:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+services:
+  go-gateway:
+    build: ./go-gateway
+  python-worker:
+    build: ./python-worker
