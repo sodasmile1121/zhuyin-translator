@@ -130,12 +130,14 @@ class TestWorkerStream(unittest.TestCase):
         for args in mock_redis.xadd.call_args_list:
             self.assertNotEqual(args[0][0], "stream:task:dlq")
 
+    @patch("worker.r_raw")
     @patch("worker.r_text")
     @patch("worker.handle_single_job_logic")
     def test_third_failure_go_dlq(
         self,
         mock_logic,
-        mock_redis
+        mock_redis,
+        mock_raw
     ):
         mock_redis.xautoclaim.side_effect = [
             ("0-0", [("msg-fail", {"job_id":"job-dead", "file_path":"file.pdf"})], None), 
@@ -157,6 +159,11 @@ class TestWorkerStream(unittest.TestCase):
                 "failed_consumer":"worker-1"
             }
         )
+        mock_redis.xadd.assert_any_call(
+            "stream:job",
+            {"job_id": "job-dead", "status": "failed", "output_path": ""}
+        )
+        self.assertEqual(mock_raw.set.call_args[0][0], "result:job-dead")
         mock_redis.xack.assert_called_with("stream:task", "python-worker-group", "msg-fail")
 
     @patch("worker.r_text")
