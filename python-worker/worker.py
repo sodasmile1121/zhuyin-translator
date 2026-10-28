@@ -97,7 +97,7 @@ def run_translation_pipeline(input_path: str, output_path: str) -> dict:
     print(f"[Engine] Core translation engine starting...")
     result_data = process_file_task(input_path) 
     print(f"[Engine] Core PDF rendering starting...")
-    generate_zhuyin_pdf(output_path, result_data['char_zy'])
+    generate_zhuyin_pdf(output_path, result_data.pop('full_char_zy'))
     return result_data
 
 def handle_single_job_logic(job_id: str, file_path: str) -> dict:
