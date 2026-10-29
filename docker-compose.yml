@@ -8,10 +8,8 @@ services:
     user: "0:0"
     environment:
       POSTGRES_USER: u_translator
-      POSTGRES_PASSWORD: p_password123
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
       POSTGRES_DB: translator_db
-    ports:
-      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -20,8 +18,9 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
     networks:
       - main-net
 
@@ -34,7 +33,7 @@ services:
       - postgres
     environment:
       - REDIS_ADDR=redis:6379
-      - DATABASE_URL=postgres://u_translator:p_password123@postgres:5432/translator_db?sslmode=disable
+      - DATABASE_URL=postgres://u_translator:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/translator_db?sslmode=disable
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:8081}
       - AWS_REGION=ap-northeast-1
       - AWS_S3_BUCKET=${AWS_S3_BUCKET}
@@ -49,8 +48,6 @@ services:
 
   python-worker:
     image: ghcr.io/sodasmile1121/zhuyin-translator/python-worker:${IMAGE_TAG:-latest}
-    ports:
-      - "8000:8000"
     depends_on:
       - redis
     environment:
@@ -70,7 +67,7 @@ services:
     image: prom/prometheus:v3.10.0
     container_name: prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./prometheus:/etc/prometheus
       - prometheus_data:/prometheus
@@ -91,7 +88,7 @@ services:
     container_name: cadvisor
     privileged: true
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
@@ -105,7 +102,7 @@ services:
     image: grafana/grafana:12.4.0
     container_name: grafana
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning
@@ -123,3 +120,4 @@ volumes:
   prometheus_data:
   grafana_data:
   pgdata:
+  redisdata:
