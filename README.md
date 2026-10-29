@@ -1,6 +1,6 @@
 # Distributed Document Processing System
 
-An event-driven distributed document processing system for asynchronous PDF translation, built with **Go**, **Python**, **Redis Streams**, **PostgreSQL**, and **AWS S3**.
+An event-driven distributed document processing system for asynchronous PDF Zhuyin (注音) annotation, built with **Go**, **Python**, **Redis Streams**, **PostgreSQL**, and **AWS S3**.
 
 The system decouples request handling from document processing using Redis Streams Consumer Groups, enabling scalable background processing, fault tolerance, and real-time job tracking.
 
@@ -26,7 +26,7 @@ The system decouples request handling from document processing using Redis Strea
 ### Distributed Storage
 - AWS S3 for document storage
 - PostgreSQL for job metadata
-- Redis cache with Gzip-compressed translation results
+- Redis cache with Gzip-compressed annotation results
 
 ### DevOps
 - Docker Compose deployment
@@ -102,6 +102,8 @@ flowchart TD
     Client -.->|Direct Download via Presigned URL| S3
 ```
 
+A static version of this diagram: [`docs/images/system_architecture.png`](./docs/images/system_architecture.png).
+
 ---
 
 # Tech Stack
@@ -143,8 +145,8 @@ Each worker:
 - downloads the PDF from S3
 - extracts document contents
 - generates Zhuyin annotations
-- renders the translated PDF
-- uploads the translated document back to S3
+- renders the annotated PDF
+- uploads the annotated document back to S3
 
 ---
 
@@ -152,7 +154,7 @@ Each worker:
 
 After processing,
 
-- translation results are compressed with Gzip
+- annotation results are compressed with Gzip
 - cached in Redis
 - completion events are published back to Redis Streams
 - the Gateway updates the job status
@@ -222,7 +224,7 @@ Jobs that exceed the retry threshold are moved into a Dead Letter Queue for furt
 Stores
 
 - uploaded PDFs
-- translated PDFs
+- annotated PDFs
 
 ### PostgreSQL
 
@@ -234,13 +236,13 @@ Stores
 
 ### Redis Cache
 
-Stores compressed translation results for fast status retrieval.
+Stores compressed annotation results for fast status retrieval.
 
 ---
 
 ## Real-time Job Tracking
 
-Clients can monitor translation progress through
+Clients can monitor processing progress through
 
 - REST polling
 - WebSocket notifications
@@ -251,13 +253,18 @@ without waiting for synchronous processing.
 
 ## CI/CD
 
-The project uses GitHub Actions to
+The workflow in `.github/workflows/ci.yml` keeps checks and deployment separate:
 
-- Run Python and Go linters
-- Execute Python unit tests (`pytest`) and Go unit tests (`go test`)
-- Build Docker images for Gateway and Worker services
-- Publish tagged images to GitHub Container Registry (GHCR)
-- Automatically deploy updated containers to AWS EC2
+| Event | What runs |
+|---|---|
+| Pull request to `master` | flake8 and `golangci-lint`, `pytest` and `go test -race`, `docker compose config` validation, and image builds (nothing is pushed or deployed) |
+| Push to `master` (after a merge) | everything above, then the images are pushed to GHCR tagged `latest` and with the commit SHA, and the app is deployed to AWS EC2 |
+| Manual run (`workflow_dispatch`) | same as a push; an optional `image_tag` input redeploys an earlier commit (rollback) |
+
+Notes:
+- Image builds wait for the tests, and deployment waits for the builds.
+- Deployment only runs when the repository variable `DEPLOY_ENABLED` is `true`, so the pipeline does not fail while no host is running.
+- The deploy job copies the compose file to the host, records the deployed tag as `IMAGE_TAG` in the host's `.env`, runs `docker compose pull` and `up -d`, and finishes with a smoke test against the gateway.
 
 ---
 
@@ -282,10 +289,10 @@ This project implements several production-inspired backend patterns.
 # Load Testing & System Benchmarks
 
 Current testing coverage includes:
-- Python & Go unit tests
-- End-to-end API integration tests (Full flow validation)
-- GitHub Actions automated CI workflow
-- k6 load, benchmark, and spike testing
+- Python (`pytest`) and Go (`go test -race`) unit tests, run on every pull request
+- k6 load, benchmark, breakpoint and spike tests, including an end-to-end lifecycle test (upload → status → download)
+
+> **Note:** The end-to-end and spike results below (sections 2 to 4) were measured before a fix to the worker, which at that time rendered the output PDF from a 10-character preview instead of the whole document, so the per-job processing cost was understated. The upload ingestion results (section 1) only exercise the gateway and are not affected. The end-to-end numbers will be re-measured.
 
 ---
 
@@ -365,15 +372,15 @@ System telemetry captured during the **Spike & Drain Scenario** (`mixed_life_cyc
 
 | **System & Gateway Performance** | **Worker & Hardware Resources** |
 | :---: | :---: |
-| ![API QPS & Status](./docs/images/grafana_qps_status.png)<br>*API QPS & HTTP Status Distribution* | ![Gateway Resources](./docs/images/grafana_gateway_latency.png)<br>*Gateway Latency (P95) & Active Goroutines* |
+| ![API QPS & Status](./docs/images/grafana_qps_status.png)<br>*API QPS & HTTP Status (`/upload` only)* | ![Gateway Resources](./docs/images/grafana_gateway_latency.png)<br>*Gateway Latency (P95) & Active Goroutines* |
 | ![Worker Processing](./docs/images/grafana_worker_throughput.png)<br>*Worker Job Execution Rate & Duration* | ![EC2 Resources](./docs/images/grafana_ec2_resources.png)<br>*EC2 CPU & Memory Utilization* |
 
 #### Observability & Architectural Takeaways:
 
 * **Surge Absorption & Backpressure:** Asynchronous queueing via Redis Streams successfully buffered sudden 1,000-VU traffic bursts, preventing worker CPU exhaustion from crashing the web gateway.
-* **Worker Queue Clearance:** Worker throughput sustained a steady **~8 ops/s** during peak load and continued processing at maximum capacity throughout the Drain Phase (0 VU) until the queue was empty.
-* **Gateway Resource Efficiency:** The Go Gateway managed **~1,000 active goroutines** while maintaining a lightweight **Heap Allocation of ~30 MiB** and GC pause times **< 600 µs**.
-* **Bottleneck Identification:** CPU utilization reached **~180%** on the dual-core EC2 instance during processing, confirming image transformation in Python workers as the system's primary CPU-bound bottleneck.
+* **Worker Queue Clearance:** Worker throughput stayed at roughly **7–8 ops/s** during peak load and was still about 8 ops/s when the load stopped (the capture ends before the queue is shown to be empty, and no queue-depth metric is exported yet).
+* **Gateway Resource Efficiency:** The Go Gateway managed **~1,000 active goroutines** while maintaining a lightweight **Heap Allocation peaking around 32 MiB** and GC pause times **< 600 µs**.
+* **Bottleneck Identification:** Host CPU stayed at about **190%** of the 2 vCPUs, all three workers were busy for the whole run and each job took roughly 0.4 s (3 workers ÷ 0.4 s ≈ 7.5 jobs/s), which points to the Python worker pool as the end-to-end bottleneck. The CPU chart is host-wide; per-container CPU is not shown.
 ---
 
 # Project Structure
@@ -427,46 +434,36 @@ System telemetry captured during the **Spike & Drain Scenario** (`mixed_life_cyc
 
 1. **Clone the repository:**
    ```bash
-   git clone [https://github.com/sodasmile1121/zhuyin-translator.git](https://github.com/sodasmile1121/zhuyin-translator.git)
+   git clone https://github.com/sodasmile1121/zhuyin-translator.git
    cd zhuyin-translator/
    ```
 
-2. **Configure Environment Variables:**
-    ```bash
-    # AWS Settings
-    AWS_REGION=us-east-1
-    AWS_S3_BUCKET=your-pdf-bucket-name
+2. **Configure environment variables:** copy the template and fill it in.
+   ```bash
+   cp .env.example .env
+   ```
+   Required: `AWS_S3_BUCKET`, `POSTGRES_PASSWORD` (for example `openssl rand -hex 16`) and `ADMIN_PASSWORD` (Grafana). `.env` is ignored by git. Optional: `ALLOWED_ORIGINS` (defaults to `http://localhost:8081`; add the host's address to open the UI from another origin).
 
-    # Optional: Only needed for local testing without IAM Role
-    # On AWS EC2 with IAM Role attached, leave these commented out.
-    # AWS_ACCESS_KEY_ID=your-aws-access-key
-    # AWS_SECRET_ACCESS_KEY=your-aws-secret-key
+   The gateway and the worker reach S3 through the default AWS credential chain. On EC2, attach an IAM role with access to the bucket. Running anywhere else needs AWS credentials to be passed into the containers, which `docker-compose.yml` does not do yet.
 
-    # Database & Redis Settings
-    DATABASE_URL=postgres://postgres:postgres@postgres:5432/pdf_db?sslmode=disable
-    REDIS_ADDR=redis:6379
+3. **Start all services:**
+   ```bash
+   # pull the prebuilt images from GHCR (latest, or IMAGE_TAG from .env)
+   docker compose up -d
 
-    # CORS Settings
-    ALLOWED_ORIGINS=http://localhost:8081
-    ```
+   # or build the gateway and worker images from the local source
+   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+   ```
 
+4. **Verify:**
+   - Web UI & API Gateway: `http://localhost:8081`
+   - Grafana: `http://localhost:3000`, Prometheus: `http://localhost:9090` (both listen on the host's localhost only; use an SSH tunnel on a remote host)
+   - Postgres and Redis are only reachable inside the Docker network.
 
-3. **Start All Services:**
-    ```bash
-    docker compose up --build -d
-    ```
-
-
-4. **Verify Application Status:**
-* Web UI & API Gateway: Open `http://localhost:8081` in your browser to test PDF uploads.
-* Prometheus Metrics: `http://localhost:9090`
-* Grafana Dashboard: `http://localhost:3000`
-
-
-5. **Stop All Services:**
-    ```bash
-    docker compose down
-    ```
+5. **Stop all services:**
+   ```bash
+   docker compose down
+   ```
 ---
 
 # Future Improvements
