@@ -5,6 +5,7 @@ networks:
 services:
   postgres:
     image: postgres:15-alpine
+    restart: unless-stopped
     user: "0:0"
     environment:
       POSTGRES_USER: u_translator
@@ -18,6 +19,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redisdata:/data
@@ -26,6 +28,7 @@ services:
 
   go-gateway:
     image: ghcr.io/sodasmile1121/zhuyin-translator/go-gateway:${IMAGE_TAG:-latest}
+    restart: unless-stopped
     ports:
       - "8081:8080"
     depends_on:
@@ -48,6 +51,7 @@ services:
 
   python-worker:
     image: ghcr.io/sodasmile1121/zhuyin-translator/python-worker:${IMAGE_TAG:-latest}
+    restart: unless-stopped
     depends_on:
       - redis
     environment:
@@ -85,6 +89,7 @@ services:
 
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:v0.47.0
+    restart: unless-stopped
     container_name: cadvisor
     privileged: true
     ports:
