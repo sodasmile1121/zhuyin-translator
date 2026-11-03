@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -62,7 +63,8 @@ var corsGuard = struct {
 type JobRepository interface {
 	CreateJob(ctx context.Context, arg db.CreateJobParams) error
 	UpdateJobStatus(ctx context.Context, arg db.UpdateJobStatusParams) error
-	GetJobStatus(ctx context.Context, jobID string) (string, error)
+	GetJob(ctx context.Context, jobID string) (db.Job, error)
+	ListStuckJobs(ctx context.Context, olderThan time.Duration, limit int32) ([]db.ListStuckJobsRow, error)
 }
 
 type StorageService interface {
@@ -73,6 +75,8 @@ type StorageService interface {
 type QueueService interface {
 	PublishTask(ctx context.Context, jobID, filePath string) error
 	FetchResultCache(ctx context.Context, jobID string) ([]byte, error)
+	// TryMarkRequeued reports whether the caller is the first to mark jobID within ttl.
+	TryMarkRequeued(ctx context.Context, jobID string, ttl time.Duration) (bool, error)
 }
 
 type SQLJobRepository struct {
@@ -87,8 +91,15 @@ func (r *SQLJobRepository) UpdateJobStatus(ctx context.Context, arg db.UpdateJob
 	return r.queries.UpdateJobStatus(ctx, arg)
 }
 
-func (r *SQLJobRepository) GetJobStatus(ctx context.Context, jobID string) (string, error) {
-	return r.queries.GetJobStatus(ctx, jobID)
+func (r *SQLJobRepository) GetJob(ctx context.Context, jobID string) (db.Job, error) {
+	return r.queries.GetJob(ctx, jobID)
+}
+
+func (r *SQLJobRepository) ListStuckJobs(ctx context.Context, olderThan time.Duration, limit int32) ([]db.ListStuckJobsRow, error) {
+	return r.queries.ListStuckJobs(ctx, db.ListStuckJobsParams{
+		OlderThanSecs: olderThan.Seconds(),
+		MaxRows:       limit,
+	})
 }
 
 type S3StorageService struct {
@@ -146,6 +157,10 @@ func (q *RedisQueueService) FetchResultCache(ctx context.Context, jobID string) 
 	return io.ReadAll(reader)
 }
 
+func (q *RedisQueueService) TryMarkRequeued(ctx context.Context, jobID string, ttl time.Duration) (bool, error) {
+	return q.rdb.SetNX(ctx, "requeued:"+jobID, "1", ttl).Result()
+}
+
 type Server struct {
 	id      string
 	repo    JobRepository
@@ -165,6 +180,12 @@ type JobInfo struct {
 type Hub struct {
 	connections map[string]*websocket.Conn
 	mux         sync.RWMutex
+}
+
+type statusResponse struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
+	PdfPath string `json:"pdf_path,omitempty"`
 }
 
 type ResultPayload struct {
@@ -194,82 +215,6 @@ func (h *Hub) Unregister(jobID string) {
 		conn.Close()
 		delete(h.connections, jobID)
 	}
-}
-
-func (s *Server) startRedisSub() {
-	go func() {
-		err := s.rdb.XGroupCreateMkStream(s.ctx, StreamKey, GroupName, "$").Err()
-		if err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
-			log.Println("Redis Stream group warning:", err)
-		}
-		for {
-			streams, err := s.rdb.XReadGroup(s.ctx, &redis.XReadGroupArgs{
-				Group:    GroupName,
-				Consumer: s.id,
-				Streams:  []string{StreamKey, ">"},
-				Count:    1,
-				Block:    100 * time.Millisecond,
-			}).Result()
-			if err != nil {
-				if err == redis.Nil {
-					continue
-				}
-				if strings.Contains(err.Error(), "closed") {
-					log.Println("Redis client closed, exiting subscription loop gracefully.")
-					return
-				}
-				log.Println("Failed to read from stream:", err)
-			}
-			for _, stream := range streams {
-				for _, message := range stream.Messages {
-					jobID, ok := message.Values["job_id"].(string)
-					if !ok {
-						continue
-					}
-					status, ok := message.Values["status"].(string)
-					if !ok {
-						continue
-					}
-					outputPath, ok := message.Values["output_path"].(string)
-					if !ok {
-						continue
-					}
-					payload, err := json.Marshal(message.Values)
-					if err != nil {
-						log.Println("Fail to marshal json:", err)
-						continue
-					}
-
-					err = s.repo.UpdateJobStatus(s.ctx, db.UpdateJobStatusParams{
-						Status:      status,
-						S3OutputUrl: sql.NullString{String: outputPath, Valid: outputPath != ""},
-						JobID:       jobID,
-					})
-					if err != nil {
-						log.Println("Database UPDATE error:", err)
-						continue
-					}
-
-					s.hub.mux.RLock()
-					conn, exists := s.hub.connections[jobID]
-					s.hub.mux.RUnlock()
-					if exists {
-						err := conn.WriteMessage(websocket.TextMessage, []byte(payload))
-						if err != nil {
-							log.Printf("Failed to push notification to Job %s: %v\n", jobID, err)
-						} else {
-							s.rdb.XAck(s.ctx, StreamKey, GroupName, message.ID)
-							s.hub.Unregister(jobID)
-							log.Printf("Successfully pushed job %s completion message to frontend!\n", jobID)
-						}
-					} else {
-						s.rdb.XAck(s.ctx, StreamKey, GroupName, message.ID)
-						log.Printf("The websocket for job %s has not been established\n", jobID)
-					}
-				}
-			}
-		}
-	}()
 }
 
 var upgrader = websocket.Upgrader{
@@ -432,44 +377,52 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// writeJSON sends a JSON body with the right Content-Type. http.Error cannot be used for JSON because it
+// overwrites Content-Type with text/plain.
+func writeJSON(w http.ResponseWriter, code int, body []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	if _, err := w.Write(body); err != nil {
+		log.Println("Failed to write HTTP response:", err)
+	}
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if !s.setCORS(w, r) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
 	jobID := r.URL.Query().Get("job_id")
 	if jobID == "" {
-		http.Error(w, `{"error": "Missing job_id"}`, http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, []byte(`{"error": "Missing job_id"}`))
 		return
 	}
 
 	resultData, err := s.queue.FetchResultCache(s.ctx, jobID)
 	if err == nil {
-		w.WriteHeader(http.StatusOK)
-		if _, err := w.Write(resultData); err != nil {
-			log.Println("Failed to write HTTP response:", err)
-		}
+		writeJSON(w, http.StatusOK, resultData)
+		return
+	}
+	// A missing entry is normal (it expires after an hour). Any other cache error (Redis down, corrupt
+	// entry) must not hide what Postgres knows, so both fall back to the database.
+	if !errors.Is(err, redis.Nil) {
+		log.Printf("Result cache unavailable for job %s, falling back to the database: %v\n", jobID, err)
+	}
+
+	job, err := s.repo.GetJob(s.ctx, jobID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeJSON(w, http.StatusNotFound, []byte(`{"error": "Job not found"}`))
+		return
+	} else if err != nil {
+		writeJSON(w, http.StatusInternalServerError, []byte(`{"error": "Database error"}`))
 		return
 	}
 
-	if err == redis.Nil {
-		status, err := s.repo.GetJobStatus(s.ctx, jobID)
-		if err == sql.ErrNoRows {
-			w.WriteHeader(http.StatusNotFound)
-			if _, err := w.Write([]byte(`{"error": "Job not found"}`)); err != nil {
-				log.Println("Failed to write HTTP response:", err)
-			}
-			return
-		} else if err != nil {
-			http.Error(w, `{"error": "Database error"}`, http.StatusInternalServerError)
-			return
-		}
-
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"status": "%s", "message": "Job is currently %s"}`, status, status)
-		return
-	}
-	http.Error(w, `{"error": "Fetch error"}`, http.StatusInternalServerError)
+	body, _ := json.Marshal(statusResponse{
+		Status:  job.Status,
+		Message: "Job is currently " + job.Status,
+		PdfPath: job.S3OutputUrl.String,
+	})
+	writeJSON(w, http.StatusOK, body)
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
@@ -478,22 +431,25 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	jobID := r.URL.Query().Get("job_id")
 	if jobID == "" {
-		http.Error(w, `{"error": "Missing job_id"}`, http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, []byte(`{"error": "Missing job_id"}`))
 		return
 	}
 
+	// The cache entry expires after an hour, and it may also be unreadable (Redis down, corrupt entry).
+	// In every such case Postgres still knows how the job ended.
 	resultData, err := s.queue.FetchResultCache(s.ctx, jobID)
-	if err == redis.Nil {
-		http.Error(w, "File is still processing, please wait...", http.StatusNotFound)
-		return
-	} else if err != nil {
-		http.Error(w, "Read decompress data error", http.StatusInternalServerError)
+	if err != nil {
+		if !errors.Is(err, redis.Nil) {
+			log.Printf("Result cache unavailable for job %s, falling back to the database: %v\n", jobID, err)
+		}
+		s.downloadFromDB(w, r, jobID)
 		return
 	}
 
 	var payload ResultPayload
 	if err := json.Unmarshal(resultData, &payload); err != nil {
-		http.Error(w, "Parse JSON error", http.StatusInternalServerError)
+		log.Printf("Corrupt cache entry for job %s, falling back to the database: %v\n", jobID, err)
+		s.downloadFromDB(w, r, jobID)
 		return
 	}
 
@@ -502,13 +458,40 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	downloadURL, err := s.storage.GeneratePresignedURL(s.ctx, payload.PdfPath, 10*time.Minute)
+	s.redirectToOutput(w, r, payload.PdfPath)
+}
+
+func (s *Server) redirectToOutput(w http.ResponseWriter, r *http.Request, s3Key string) {
+	downloadURL, err := s.storage.GeneratePresignedURL(s.ctx, s3Key, 10*time.Minute)
 	if err != nil {
 		http.Error(w, "Failed to generate download URL", http.StatusInternalServerError)
 		return
 	}
-
 	http.Redirect(w, r, downloadURL, http.StatusFound)
+}
+
+func (s *Server) downloadFromDB(w http.ResponseWriter, r *http.Request, jobID string) {
+	job, err := s.repo.GetJob(s.ctx, jobID)
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "Job not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	switch job.Status {
+	case "success":
+		if !job.S3OutputUrl.Valid || job.S3OutputUrl.String == "" {
+			http.Error(w, "Job finished but has no output file", http.StatusInternalServerError)
+			return
+		}
+		s.redirectToOutput(w, r, job.S3OutputUrl.String)
+	case "failed":
+		http.Error(w, "Cannot download. Job failed.", http.StatusUnprocessableEntity)
+	default:
+		http.Error(w, "File is still processing, please wait...", http.StatusNotFound)
+	}
 }
 
 func setUpOrigins() {
@@ -631,6 +614,7 @@ func main() {
 	}
 
 	srv.startRedisSub()
+	go newReconcilerFromEnv(repo, storage, queue).Run(ctx)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "./index.html")
