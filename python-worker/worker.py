@@ -51,6 +51,12 @@ TASK_GROUP_NAME = "python-worker-group"
 DLQ_STREAM_KEY = "stream:task:dlq"
 STREAM_KEY = "stream:job"
 
+# A task idle in the PEL for this long (ms) is taken over by another worker.
+CLAIM_MIN_IDLE_MS = int(os.getenv("CLAIM_MIN_IDLE_MS", "60000"))
+READ_BLOCK_MS = int(os.getenv("READ_BLOCK_MS", "10000"))
+# A task may be delivered at most this many times, including deliveries that ended in a crash.
+MAX_DELIVERIES = int(os.getenv("MAX_DELIVERIES", "3"))
+
 
 def download_pdf_file(url: str, local_path: str):
     print(f"[I/O Download] Downloading input file from S3: {url}...")
@@ -120,91 +126,131 @@ def handle_single_job_logic(job_id: str, file_path: str) -> dict:
         clean_temp_files(local_input, local_output)
 
 
+def get_delivery_count(message_id: str) -> int:
+    info = r_text.xpending_range(TASK_STREAM_KEY, TASK_GROUP_NAME, message_id, message_id, 1)
+    if info:
+        count = info[0].get('times_delivered')
+        if isinstance(count, int):
+            return count
+    return 1
+
+
+def fail_job(job_id, file_path, error: str, consumer_name: str, message_id: str):
+    """Quarantine a task in the DLQ, tell the gateway it failed (when the job is known) and acknowledge it."""
+    r_text.xadd(DLQ_STREAM_KEY, {
+        "job_id": job_id or "",
+        "file_path": file_path or "",
+        "error": error,
+        "failed_consumer": consumer_name,
+        "message_id": message_id,
+    })
+    if job_id:
+        error_payload = {"status": "failed", "pdf_path": "", "error": error, "preview": "", "char_zy": []}
+        err_bytes = json.dumps(error_payload).encode('utf-8')
+        r_raw.set(f"result:{job_id}", gzip.compress(err_bytes), ex=3600)
+        r_text.xadd(STREAM_KEY, {'job_id': job_id, 'status': 'failed', 'output_path': ''})
+    r_text.xack(TASK_STREAM_KEY, TASK_GROUP_NAME, message_id)
+
+
+def run_once(consumer_name: str, start_id: str) -> str:
+    """One iteration of the worker loop. Returns the cursor to pass to the next XAUTOCLAIM call."""
+    next_start_id, claimed, _ = r_text.xautoclaim(
+        TASK_STREAM_KEY, TASK_GROUP_NAME, consumer_name,
+        min_idle_time=CLAIM_MIN_IDLE_MS, start_id=start_id, count=1
+    )
+    if claimed:
+        message_id, message_values = claimed[0]
+        print(f"[{consumer_name}] Retrieve task from pending task: {message_id}")
+    else:
+        response = r_text.xreadgroup(
+            groupname=TASK_GROUP_NAME,
+            consumername=consumer_name,
+            streams={TASK_STREAM_KEY: ">"},
+            count=1,
+            block=READ_BLOCK_MS
+        )
+        if not response:
+            return next_start_id
+        _, messages = response[0]
+        message_id, message_values = messages[0]
+
+    job_id = message_values.get("job_id") if message_values else None
+    file_path = message_values.get("file_path") if message_values else None
+    if not job_id or not file_path:
+        reason = "empty message" if not message_values else "missing job_id or file_path"
+        print(f"[{consumer_name}] Invalid message {message_id} ({reason}), moving it to the DLQ.")
+        fail_job(job_id, file_path, f"invalid message: {reason}", consumer_name, message_id)
+        return next_start_id
+
+    delivery_count = get_delivery_count(message_id)
+    if delivery_count > MAX_DELIVERIES:
+        print(f"[{consumer_name}] Job {job_id} was delivered {delivery_count} times without completing, moving it to the DLQ.")
+        fail_job(
+            job_id, file_path,
+            f"gave up after {delivery_count - 1} deliveries that never completed (the worker probably crashed or timed out)",
+            consumer_name, message_id
+        )
+        return next_start_id
+
+    try:
+        ACTIVE_JOBS.inc()
+        with JOB_PROCESS_TIME.time():
+            job_res = handle_single_job_logic(job_id, file_path)
+        r_text.xadd(STREAM_KEY, {'job_id': job_id, 'status': 'success', 'output_path': job_res['s3_output_path']})
+        r_text.xack(TASK_STREAM_KEY, TASK_GROUP_NAME, message_id)
+        JOB_PROCESSED_TOTAL.labels(status='success').inc()
+        print(f"{job_id} completed and ACKed.")
+
+    except Exception as exc:
+        JOB_PROCESSED_TOTAL.labels(status='failed').inc()
+        print(f"Job {job_id} encountered an error: {exc}")
+        traceback.print_exc()
+
+        delivery_count = get_delivery_count(message_id)
+        if delivery_count < MAX_DELIVERIES:
+            print(f"Retry job {job_id} later. Delivery count: {delivery_count}")
+            time.sleep(2)
+        else:
+            print(f"Job {job_id} failed {MAX_DELIVERIES} times. Evicting to DLQ...")
+            fail_job(job_id, file_path, str(exc), consumer_name, message_id)
+            print(f"{job_id} moved to DLQ and ACKed.")
+    finally:
+        ACTIVE_JOBS.dec()
+    return next_start_id
+
+
 def worker_task(worker_id):
     consumer_name = f"worker-{worker_id}"
     print(f"Worker {worker_id} (PID: {os.getpid()}) starts as {consumer_name}")
     start_id = "0-0"
     while True:
         try:
-            next_start_id, message, _ = r_text.xautoclaim(
-                TASK_STREAM_KEY, TASK_GROUP_NAME, consumer_name, 
-                min_idle_time=60000, start_id=start_id, count=1
-            )
-            start_id = next_start_id
-            if message:
-                message_id, message_values = message[0]
-                if not message_values:
-                    print(f"[{consumer_name}] Found ghost pending message {message_id}, acknowledging to purge.")
-                    r_text.xack(TASK_STREAM_KEY, TASK_GROUP_NAME, message_id)
-                    continue
-                job_id = message_values.get("job_id")
-                file_path = message_values.get("file_path")
-                print(f"Retrieve task from pending task: {message_id}, Job: {job_id}")
-                if not job_id or not file_path:
-                    print(f"[{consumer_name}] Invalid pending payload, acking to clear. ID: {message_id}")
-                    r_text.xack(TASK_STREAM_KEY, TASK_GROUP_NAME, message_id)
-                    continue
-            else:
-                response = r_text.xreadgroup(
-                    groupname=TASK_GROUP_NAME,
-                    consumername=consumer_name,
-                    streams={TASK_STREAM_KEY: ">"},
-                    count=1,
-                    block=10000
-                )
-                if not response:
-                    continue
-                _, messages = response[0]
-                message_id, message_values = messages[0]
-                job_id = message_values.get("job_id")
-                file_path = message_values.get("file_path")
-                if not job_id or not file_path:
-                    print(f"[{consumer_name}] Invalid message payload, acking to clear. ID: {message_id}")
-                    r_text.xack(TASK_STREAM_KEY, TASK_GROUP_NAME, message_id)
-                    continue
-
-            try:
-                ACTIVE_JOBS.inc()
-                with JOB_PROCESS_TIME.time():
-                    job_res = handle_single_job_logic(job_id, file_path)
-                JOB_PROCESSED_TOTAL.labels(status='success').inc()
-                r_text.xadd(STREAM_KEY, {'job_id': job_id, 'status': 'success', 'output_path': job_res['s3_output_path']})
-                r_text.xack(TASK_STREAM_KEY, TASK_GROUP_NAME, message_id)
-                print(f"{job_id} completed and ACKed.")
-
-            except Exception as exc:
-                JOB_PROCESSED_TOTAL.labels(status='failed').inc()
-                print(f"Job {job_id} encountered an error: {exc}")
-                traceback.print_exc()
-                
-                pending_info = r_text.xpending_range(TASK_STREAM_KEY, TASK_GROUP_NAME, message_id, message_id, 1)
-                
-                delivery_count = 1
-                if pending_info:
-                    delivery_count = pending_info[0].get('times_delivered', 1)
-                if delivery_count < 3:
-                    print(f"Retry job {job_id} later. Delivery count: {delivery_count}")
-                    time.sleep(2) 
-                else:
-                    print(f"Job {job_id} failed 3 times. Evicting to DLQ...")
-                    r_text.xadd(DLQ_STREAM_KEY, {
-                        "job_id": job_id, 
-                        "file_path": file_path, 
-                        "error": str(exc),
-                        "failed_consumer": consumer_name
-                    })
-                    error_payload = {"status": "failed", "pdf_path": "", "error": str(exc), "preview": "", "char_zy": []}
-                    err_bytes = json.dumps(error_payload).encode('utf-8')
-                    r_raw.set(f"result:{job_id}", gzip.compress(err_bytes), ex=3600)
-                    r_text.xadd(STREAM_KEY, {'job_id': job_id, 'status': 'failed', 'output_path': ''})
-                    r_text.xack(TASK_STREAM_KEY, TASK_GROUP_NAME, message_id)
-                    print(f"{job_id} moved to DLQ and ACKed.")
-            finally:
-                ACTIVE_JOBS.dec()
-
+            start_id = run_once(consumer_name, start_id)
         except Exception as queue_err:
             print(f"Worker-{worker_id} abnormal queue connection : {queue_err}")
             time.sleep(2)
+
+
+def spawn_worker(worker_id):
+    p = Process(target=worker_task, args=(worker_id,))
+    p.start()
+    return p
+
+
+def restart_dead_workers(processes, spawn=spawn_worker):
+    """Replace every worker process that has exited and return how many were restarted."""
+    restarted = 0
+    for worker_id, p in list(processes.items()):
+        if not p.is_alive():
+            print(f"[Supervisor] worker-{worker_id} exited with code {p.exitcode}, restarting it.")
+            try:
+                # drop the metrics the dead process left behind (e.g. its "active jobs" gauge)
+                multiprocess.mark_process_dead(p.pid)
+            except Exception as e:
+                print(f"[Prometheus Cleanup Warning] {e}")
+            processes[worker_id] = spawn(worker_id)
+            restarted += 1
+    return restarted
 
 
 if __name__ == '__main__':
@@ -231,13 +277,9 @@ if __name__ == '__main__':
         else:
             raise e
 
-    num_workers = 3
-    processes = []
+    num_workers = int(os.getenv("WORKER_COUNT", "3"))
+    processes = {worker_id: spawn_worker(worker_id) for worker_id in range(1, num_workers + 1)}
 
-    for i in range(num_workers):
-        p = Process(target=worker_task, args=(i+1,))
-        processes.append(p)
-        p.start()
-
-    for p in processes:
-        p.join()
+    while True:
+        time.sleep(5)
+        restart_dead_workers(processes)
