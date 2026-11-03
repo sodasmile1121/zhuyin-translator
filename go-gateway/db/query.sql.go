@@ -26,17 +26,65 @@ func (q *Queries) CreateJob(ctx context.Context, arg CreateJobParams) error {
 	return err
 }
 
-const getJobStatus = `-- name: GetJobStatus :one
-SELECT status 
-FROM jobs 
+const getJob = `-- name: GetJob :one
+SELECT job_id, status, s3_input_url, s3_output_url, created_at
+FROM jobs
 WHERE job_id = $1
 `
 
-func (q *Queries) GetJobStatus(ctx context.Context, jobID string) (string, error) {
-	row := q.db.QueryRowContext(ctx, getJobStatus, jobID)
-	var status string
-	err := row.Scan(&status)
-	return status, err
+func (q *Queries) GetJob(ctx context.Context, jobID string) (Job, error) {
+	row := q.db.QueryRowContext(ctx, getJob, jobID)
+	var i Job
+	err := row.Scan(
+		&i.JobID,
+		&i.Status,
+		&i.S3InputUrl,
+		&i.S3OutputUrl,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const listStuckJobs = `-- name: ListStuckJobs :many
+SELECT job_id, s3_input_url
+FROM jobs
+WHERE status = 'pending'
+  AND created_at < CURRENT_TIMESTAMP - make_interval(secs => $1::float8)
+ORDER BY created_at
+LIMIT $2::int
+`
+
+type ListStuckJobsParams struct {
+	OlderThanSecs float64
+	MaxRows       int32
+}
+
+type ListStuckJobsRow struct {
+	JobID      string
+	S3InputUrl string
+}
+
+func (q *Queries) ListStuckJobs(ctx context.Context, arg ListStuckJobsParams) ([]ListStuckJobsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listStuckJobs, arg.OlderThanSecs, arg.MaxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListStuckJobsRow
+	for rows.Next() {
+		var i ListStuckJobsRow
+		if err := rows.Scan(&i.JobID, &i.S3InputUrl); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const updateJobStatus = `-- name: UpdateJobStatus :exec

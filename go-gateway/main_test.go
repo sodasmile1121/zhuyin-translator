@@ -23,7 +23,8 @@ import (
 type MockJobRepository struct {
 	CreateJobFunc       func(ctx context.Context, arg db.CreateJobParams) error
 	UpdateJobStatusFunc func(ctx context.Context, arg db.UpdateJobStatusParams) error
-	GetJobStatusFunc    func(ctx context.Context, jobID string) (string, error)
+	GetJobFunc          func(ctx context.Context, jobID string) (db.Job, error)
+	ListStuckJobsFunc   func(ctx context.Context, olderThan time.Duration, limit int32) ([]db.ListStuckJobsRow, error)
 }
 
 func (m *MockJobRepository) CreateJob(ctx context.Context, arg db.CreateJobParams) error {
@@ -38,11 +39,17 @@ func (m *MockJobRepository) UpdateJobStatus(ctx context.Context, arg db.UpdateJo
 	}
 	return nil
 }
-func (m *MockJobRepository) GetJobStatus(ctx context.Context, jobID string) (string, error) {
-	if m.GetJobStatusFunc != nil {
-		return m.GetJobStatusFunc(ctx, jobID)
+func (m *MockJobRepository) GetJob(ctx context.Context, jobID string) (db.Job, error) {
+	if m.GetJobFunc != nil {
+		return m.GetJobFunc(ctx, jobID)
 	}
-	return "pending", nil
+	return db.Job{JobID: jobID, Status: "pending"}, nil
+}
+func (m *MockJobRepository) ListStuckJobs(ctx context.Context, olderThan time.Duration, limit int32) ([]db.ListStuckJobsRow, error) {
+	if m.ListStuckJobsFunc != nil {
+		return m.ListStuckJobsFunc(ctx, olderThan, limit)
+	}
+	return nil, nil
 }
 
 type MockStorageService struct {
@@ -67,6 +74,7 @@ func (m *MockStorageService) GeneratePresignedURL(ctx context.Context, s3Key str
 type MockQueueService struct {
 	PublishTaskFunc      func(ctx context.Context, jobID, filePath string) error
 	FetchResultCacheFunc func(ctx context.Context, jobID string) ([]byte, error)
+	TryMarkRequeuedFunc  func(ctx context.Context, jobID string, ttl time.Duration) (bool, error)
 }
 
 func (m *MockQueueService) PublishTask(ctx context.Context, jobID, filePath string) error {
@@ -80,6 +88,13 @@ func (m *MockQueueService) FetchResultCache(ctx context.Context, jobID string) (
 		return m.FetchResultCacheFunc(ctx, jobID)
 	}
 	return nil, redis.Nil
+}
+
+func (m *MockQueueService) TryMarkRequeued(ctx context.Context, jobID string, ttl time.Duration) (bool, error) {
+	if m.TryMarkRequeuedFunc != nil {
+		return m.TryMarkRequeuedFunc(ctx, jobID, ttl)
+	}
+	return true, nil
 }
 
 func TestHandleUpload_AllBranches(t *testing.T) {
@@ -263,8 +278,8 @@ func TestHandleStatus_Branches(t *testing.T) {
 		},
 	}
 	srv.repo = &MockJobRepository{
-		GetJobStatusFunc: func(ctx context.Context, jobID string) (string, error) {
-			return "processing", nil
+		GetJobFunc: func(ctx context.Context, jobID string) (db.Job, error) {
+			return db.Job{JobID: jobID, Status: "success", S3OutputUrl: sql.NullString{String: "outputs/done.pdf", Valid: true}}, nil
 		},
 	}
 	rr2 := httptest.NewRecorder()
@@ -272,10 +287,17 @@ func TestHandleStatus_Branches(t *testing.T) {
 	if rr2.Code != http.StatusOK {
 		t.Errorf("expected status %d when job exists in DB, got %d", http.StatusOK, rr2.Code)
 	}
+	var dbStatus statusResponse
+	if err := json.Unmarshal(rr2.Body.Bytes(), &dbStatus); err != nil {
+		t.Fatalf("DB fallback must return valid JSON, got %q: %v", rr2.Body.String(), err)
+	}
+	if dbStatus.Status != "success" || dbStatus.PdfPath != "outputs/done.pdf" {
+		t.Errorf("unexpected DB fallback payload: %+v", dbStatus)
+	}
 
 	srv.repo = &MockJobRepository{
-		GetJobStatusFunc: func(ctx context.Context, jobID string) (string, error) {
-			return "", sql.ErrNoRows
+		GetJobFunc: func(ctx context.Context, jobID string) (db.Job, error) {
+			return db.Job{}, sql.ErrNoRows
 		},
 	}
 	rr3 := httptest.NewRecorder()
@@ -285,8 +307,8 @@ func TestHandleStatus_Branches(t *testing.T) {
 	}
 
 	srv.repo = &MockJobRepository{
-		GetJobStatusFunc: func(ctx context.Context, jobID string) (string, error) {
-			return "", fmt.Errorf("some db error")
+		GetJobFunc: func(ctx context.Context, jobID string) (db.Job, error) {
+			return db.Job{}, fmt.Errorf("some db error")
 		},
 	}
 	rr4 := httptest.NewRecorder()
@@ -314,11 +336,12 @@ func TestHandleDownload_Branches(t *testing.T) {
 			return nil, redis.Nil
 		},
 	}
+	srv.repo = &MockJobRepository{}
 	req = httptest.NewRequest("GET", "/download?job_id=job-123", nil)
 	rr = httptest.NewRecorder()
 	srv.handleDownload(rr, req)
 	if rr.Code != http.StatusNotFound {
-		t.Errorf("expected status %d on cache miss, got %d", http.StatusNotFound, rr.Code)
+		t.Errorf("expected status %d on cache miss for a pending job, got %d", http.StatusNotFound, rr.Code)
 	}
 
 	goodPayload := ResultPayload{Status: "success", PdfPath: "outputs/done.pdf"}
@@ -354,8 +377,8 @@ func TestHandleDownload_Branches(t *testing.T) {
 	}
 	rr = httptest.NewRecorder()
 	srv.handleDownload(rr, req)
-	if rr.Code != http.StatusInternalServerError {
-		t.Errorf("expected status %d on corrupted cache JSON, got %d", http.StatusInternalServerError, rr.Code)
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("expected the DB fallback (pending job -> %d) on corrupted cache JSON, got %d", http.StatusNotFound, rr.Code)
 	}
 }
 
@@ -577,5 +600,99 @@ func TestRedisStreamConsumerReceiveJob(t *testing.T) {
 
 	if exist {
 		t.Error("expected connection to be closed and removed from Hub after job completion notification, but it still exists")
+	}
+}
+
+func TestHandleDownload_FallsBackToDBAfterCacheExpiry(t *testing.T) {
+	cases := []struct {
+		name       string
+		job        db.Job
+		err        error
+		expectCode int
+	}{
+		{"finished job redirects to S3", db.Job{Status: "success", S3OutputUrl: sql.NullString{String: "outputs/a.pdf", Valid: true}}, nil, http.StatusFound},
+		{"finished job without output", db.Job{Status: "success"}, nil, http.StatusInternalServerError},
+		{"failed job", db.Job{Status: "failed"}, nil, http.StatusUnprocessableEntity},
+		{"pending job", db.Job{Status: "pending"}, nil, http.StatusNotFound},
+		{"unknown job", db.Job{}, sql.ErrNoRows, http.StatusNotFound},
+		{"database error", db.Job{}, fmt.Errorf("db down"), http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &Server{
+				ctx:     context.Background(),
+				storage: &MockStorageService{},
+				queue:   &MockQueueService{},
+				repo: &MockJobRepository{
+					GetJobFunc: func(ctx context.Context, jobID string) (db.Job, error) { return tc.job, tc.err },
+				},
+			}
+			rr := httptest.NewRecorder()
+			srv.handleDownload(rr, httptest.NewRequest("GET", "/download?job_id=job-1", nil))
+			if rr.Code != tc.expectCode {
+				t.Errorf("expected %d, got %d (%s)", tc.expectCode, rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandleStatus_CacheErrorFallsBackToDBAndReturnsJSON(t *testing.T) {
+	srv := &Server{
+		ctx: context.Background(),
+		queue: &MockQueueService{
+			FetchResultCacheFunc: func(ctx context.Context, jobID string) ([]byte, error) {
+				return nil, fmt.Errorf("redis: connection refused")
+			},
+		},
+		repo: &MockJobRepository{
+			GetJobFunc: func(ctx context.Context, jobID string) (db.Job, error) {
+				return db.Job{JobID: jobID, Status: "success", S3OutputUrl: sql.NullString{String: "outputs/a.pdf", Valid: true}}, nil
+			},
+		},
+	}
+	rr := httptest.NewRecorder()
+	srv.handleStatus(rr, httptest.NewRequest("GET", "/status?job_id=j1", nil))
+
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"pdf_path":"outputs/a.pdf"`) {
+		t.Errorf("expected the DB answer, got %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleStatus_ErrorResponsesAreJSON(t *testing.T) {
+	srv := &Server{
+		ctx:   context.Background(),
+		queue: &MockQueueService{},
+		repo: &MockJobRepository{
+			GetJobFunc: func(ctx context.Context, jobID string) (db.Job, error) { return db.Job{}, fmt.Errorf("db down") },
+		},
+	}
+	for name, url := range map[string]string{"missing job_id": "/status", "database error": "/status?job_id=j1"} {
+		rr := httptest.NewRecorder()
+		srv.handleStatus(rr, httptest.NewRequest("GET", url, nil))
+		if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+			t.Errorf("%s: Content-Type = %q, want application/json", name, ct)
+		}
+	}
+}
+
+func TestHandleDownload_CacheErrorFallsBackToDB(t *testing.T) {
+	srv := &Server{
+		ctx:     context.Background(),
+		storage: &MockStorageService{},
+		queue: &MockQueueService{
+			FetchResultCacheFunc: func(ctx context.Context, jobID string) ([]byte, error) {
+				return nil, fmt.Errorf("redis: connection refused")
+			},
+		},
+		repo: &MockJobRepository{
+			GetJobFunc: func(ctx context.Context, jobID string) (db.Job, error) {
+				return db.Job{Status: "success", S3OutputUrl: sql.NullString{String: "outputs/a.pdf", Valid: true}}, nil
+			},
+		},
+	}
+	rr := httptest.NewRecorder()
+	srv.handleDownload(rr, httptest.NewRequest("GET", "/download?job_id=j1", nil))
+	if rr.Code != http.StatusFound {
+		t.Errorf("expected a redirect from the DB fallback, got %d", rr.Code)
 	}
 }
