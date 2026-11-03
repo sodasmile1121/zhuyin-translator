@@ -40,6 +40,16 @@ jobs:
   python-test:
     needs: python-lint
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -57,6 +67,9 @@ jobs:
 
     - name: Run tests
       working-directory: python-worker
+      env:
+        RUN_INTEGRATION: "1"
+        REDIS_ADDR: localhost:6379
       run: python -m pytest -q
 
   go-lint:
@@ -91,6 +104,27 @@ jobs:
   go-test:
     needs: go-lint
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
     - uses: actions/checkout@v4
 
@@ -103,6 +137,9 @@ jobs:
 
     - name: Run tests
       working-directory: go-gateway
+      env:
+        INTEGRATION_DATABASE_URL: postgres://postgres:test@localhost:5432/postgres?sslmode=disable
+        INTEGRATION_REDIS_ADDR: localhost:6379
       run: go test -race ./...
 
   compose-validate:
