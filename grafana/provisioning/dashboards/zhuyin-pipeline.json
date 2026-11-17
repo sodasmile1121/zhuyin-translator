@@ -7,7 +7,7 @@
   ],
   "description": "Host, gateway and worker view for the load tests. Built only from metrics this repo exposes.",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "graphTooltip": 1,
   "timezone": "browser",
@@ -237,8 +237,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Upload requests per second",
-      "description": "Only /upload is counted by the gateway today, split by HTTP status (200 vs 500).",
+      "title": "Requests per second",
+      "description": "All three endpoints (/upload, /status, /download), split by the HTTP status code the gateway returned.",
       "datasource": {
         "type": "prometheus",
         "uid": "${ds}"
@@ -292,7 +292,7 @@
     {
       "type": "timeseries",
       "title": "Latency P95",
-      "description": "Time spent inside the handler, per path (/upload, /status, /download).",
+      "description": "Time spent inside the handler, per path (/upload, /status, /download). For /download this is only the redirect, not the file transfer from S3.",
       "datasource": {
         "type": "prometheus",
         "uid": "${ds}"
@@ -399,11 +399,153 @@
     },
     {
       "type": "row",
-      "title": "Worker (python-worker)",
+      "title": "Task queue (between gateway and worker)",
       "collapsed": false,
       "gridPos": {
         "x": 0,
         "y": 18,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Queue backlog and tasks in flight",
+      "description": "Backlog is the queue length (tasks no worker has taken yet). In flight is tasks a worker has taken but not acknowledged: being processed, or waiting to be retried. Exported by the gateway from XINFO GROUPS.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "task_queue_backlog",
+          "legendFormat": "waiting for a worker",
+          "refId": "A",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "task_queue_in_flight",
+          "legendFormat": "taken by a worker, not acknowledged",
+          "refId": "B",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "lineInterpolation": "linear"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Time waiting in the queue (P95 and average)",
+      "description": "How long a task sat in the queue before a worker first took it (retries are not counted). Add the job processing time below to get what a user waits.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 19,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "histogram_quantile(0.95, sum(rate(python_worker_queue_wait_seconds_bucket[30s])) by (le))",
+          "legendFormat": "P95",
+          "refId": "A",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "sum(rate(python_worker_queue_wait_seconds_sum[30s])) / sum(rate(python_worker_queue_wait_seconds_count[30s]))",
+          "legendFormat": "average",
+          "refId": "B",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "lineInterpolation": "linear"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Worker (python-worker)",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 27,
         "w": 24,
         "h": 1
       },
@@ -419,7 +561,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 19,
+        "y": 28,
         "w": 8,
         "h": 8
       },
@@ -473,7 +615,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 19,
+        "y": 28,
         "w": 8,
         "h": 8
       },
@@ -538,7 +680,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 19,
+        "y": 28,
         "w": 8,
         "h": 8
       },
