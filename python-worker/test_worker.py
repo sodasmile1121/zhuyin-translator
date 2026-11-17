@@ -27,7 +27,6 @@ class TestHandleSingleJobLogic(unittest.TestCase):
     ):
         mock_pipeline.return_value = {
             "status": "success",
-            "path": "input.pdf",
             "preview": "測試預覽文字",
             "char_zy": ["測試"]
         }
@@ -67,7 +66,6 @@ class TestHandleSingleJobLogic(unittest.TestCase):
     ):
         mock_pipeline.return_value = {
             "status": "success",
-            "path": "input.pdf",
             "preview": "測試預覽文字",
             "char_zy": ["測試"]
         }

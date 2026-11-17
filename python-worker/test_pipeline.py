@@ -70,6 +70,12 @@ class TestMultiPageDocument(unittest.TestCase):
         self.assertLessEqual(len(result["char_zy"]), 10)
         self.assertNotIn("full_char_zy", result)
 
+    def test_cached_result_does_not_expose_the_workers_temp_path(self):
+        out = os.path.join(self.tmp.name, "output.pdf")
+        result = worker.run_translation_pipeline(self.src, out)
+        self.assertNotIn("path", result)
+        self.assertNotIn(self.src, str(result))
+
 
 class TestPinyinAlignment(unittest.TestCase):
 
