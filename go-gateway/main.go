@@ -13,6 +13,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -293,18 +294,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
-	statusCode := "200"
-	defer func() {
-		httpRequestsTotal.WithLabelValues("/upload", statusCode).Inc()
-	}()
-
 	if !s.setCORS(w, r) {
-		statusCode = "403"
 		return
 	}
 	err := r.ParseMultipartForm(32 << 20)
 	if err != nil {
-		statusCode = "400"
 		http.Error(w, "Failed to parse data", http.StatusBadRequest)
 		return
 	}
@@ -312,7 +306,6 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	files := r.MultipartForm.File["files"]
 	for _, fh := range files {
 		if fh.Header.Get("Content-Type") != "application/pdf" {
-			statusCode = "400"
 			http.Error(w, fmt.Sprintf("%s is not a pdf file", fh.Filename), http.StatusBadRequest)
 			return
 		}
@@ -325,7 +318,6 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 		srcFile, err := fh.Open()
 		if err != nil {
-			statusCode = "500"
 			http.Error(w, "Failed to open file", http.StatusInternalServerError)
 			return
 		}
@@ -333,14 +325,12 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		err = s.storage.UploadFile(s.ctx, srcFile, s3Key)
 		srcFile.Close()
 		if err != nil {
-			statusCode = "500"
 			http.Error(w, "Failed to upload to S3", http.StatusInternalServerError)
 			return
 		}
 
 		presignedURL, err := s.storage.GeneratePresignedURL(s.ctx, s3Key, 15*time.Minute)
 		if err != nil {
-			statusCode = "500"
 			http.Error(w, "Failed to generate presigned URL", http.StatusInternalServerError)
 			return
 		}
@@ -351,14 +341,12 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			S3InputUrl: presignedURL,
 		})
 		if err != nil {
-			statusCode = "500"
 			http.Error(w, "Failed to save job to DB", http.StatusInternalServerError)
 			return
 		}
 
 		err = s.queue.PublishTask(s.ctx, jobID, presignedURL)
 		if err != nil {
-			statusCode = "500"
 			http.Error(w, "Failed to publish task to queue", http.StatusInternalServerError)
 			return
 		}
@@ -540,14 +528,27 @@ func (s *Server) setCORS(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+// statusRecorder remembers the status code a handler wrote, so the middleware can count it.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// promMiddleware records the latency and the count (by status code) of every request to path.
 func promMiddleware(path string, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 
-		handler(w, r)
+		handler(rec, r)
 
-		duration := time.Since(start).Seconds()
-		httpRequestDuration.WithLabelValues(path).Observe(duration)
+		httpRequestDuration.WithLabelValues(path).Observe(time.Since(start).Seconds())
+		httpRequestsTotal.WithLabelValues(path, strconv.Itoa(rec.status)).Inc()
 	}
 }
 
