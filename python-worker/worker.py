@@ -20,6 +20,11 @@ multiprocess.MultiProcessCollector(registry)
 JOB_PROCESSED_TOTAL = Counter('python_worker_jobs_total', 'Total jobs processed', ['status'])
 JOB_PROCESS_TIME = Histogram('python_worker_job_duration_seconds', 'Time spent processing job')
 ACTIVE_JOBS = Gauge('python_worker_active_jobs', 'Number of currently processing jobs')
+JOB_QUEUE_WAIT = Histogram(
+    'python_worker_queue_wait_seconds',
+    'Time a task waited in the queue before a worker first took it',
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600),
+)
 
 redis_addr = os.getenv("REDIS_ADDR", "localhost:6379")
 redis_host, redis_port = redis_addr.split(":")
@@ -126,6 +131,18 @@ def handle_single_job_logic(job_id: str, file_path: str) -> dict:
         clean_temp_files(local_input, local_output)
 
 
+def queue_wait_seconds(message_id: str, now=None):
+    """Seconds since the task was added to the stream, or None if the id is not a stream id.
+
+    Redis builds a stream message id as '<milliseconds since the epoch>-<sequence>', so the id already says when the
+    task was queued. The gateway and the worker run on the same host, so their clocks agree."""
+    try:
+        added_ms = int(message_id.split("-")[0])
+    except (ValueError, AttributeError):
+        return None
+    return max(0.0, (time.time() if now is None else now) - added_ms / 1000)
+
+
 def get_delivery_count(message_id: str) -> int:
     info = r_text.xpending_range(TASK_STREAM_KEY, TASK_GROUP_NAME, message_id, message_id, 1)
     if info:
@@ -191,6 +208,11 @@ def run_once(consumer_name: str, start_id: str) -> str:
             consumer_name, message_id
         )
         return next_start_id
+
+    if delivery_count == 1:  # a retry would add the retry delay, which is not queueing time
+        wait = queue_wait_seconds(message_id)
+        if wait is not None:
+            JOB_QUEUE_WAIT.observe(wait)
 
     try:
         ACTIVE_JOBS.inc()
