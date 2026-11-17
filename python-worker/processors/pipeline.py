@@ -15,7 +15,6 @@ def process_file_task(path):
     # "full_char_zy" holds every page and is what the output PDF is rendered from.
     return {
         "status": "success",
-        "path": path,
         "preview": doc.text[0][:PREVIEW_CHARS],
         "char_zy": doc.char_zy[0][:PREVIEW_CHARS],
         "full_char_zy": [item for page in doc.char_zy for item in page],
