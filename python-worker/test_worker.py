@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch, MagicMock
 import os
+import time
 
 os.environ.setdefault("REDIS_ADDR", "localhost:6379")
 os.environ.setdefault("AWS_REGION", "us-east-1")
@@ -249,3 +250,45 @@ class TestSupervisor(unittest.TestCase):
         self.assertEqual(restarted, 1)
         self.assertIs(processes[1], replacement)
         self.assertIs(processes[2], alive)
+
+
+class TestQueueWait(unittest.TestCase):
+
+    def test_wait_is_read_from_the_stream_message_id(self):
+        self.assertAlmostEqual(worker.queue_wait_seconds("1000000-0", now=1005), 5.0)
+        self.assertAlmostEqual(worker.queue_wait_seconds("1000000-7", now=1000.5), 0.5)
+
+    def test_ids_that_are_not_stream_ids_give_none(self):
+        self.assertIsNone(worker.queue_wait_seconds("msg-fail"))
+        self.assertIsNone(worker.queue_wait_seconds(""))
+        self.assertIsNone(worker.queue_wait_seconds(None))
+
+    def test_a_clock_that_is_slightly_behind_never_gives_a_negative_wait(self):
+        self.assertEqual(worker.queue_wait_seconds("2000000-0", now=1000), 0.0)
+
+    @patch("worker.JOB_QUEUE_WAIT")
+    @patch("worker.r_raw")
+    @patch("worker.r_text")
+    @patch("worker.handle_single_job_logic", return_value={"s3_output_path": "outputs/j_translated.pdf"})
+    def test_first_delivery_records_how_long_the_task_waited(self, _logic, mock_redis, _raw, mock_wait):
+        added_ms = int((time.time() - 5) * 1000)
+        mock_redis.xautoclaim.return_value = ("0-0", [(f"{added_ms}-0", {"job_id": "j", "file_path": "f.pdf"})], None)
+        mock_redis.xpending_range.return_value = [{"times_delivered": 1}]
+
+        worker.run_once("worker-1", "0-0")
+
+        mock_wait.observe.assert_called_once()
+        self.assertAlmostEqual(mock_wait.observe.call_args[0][0], 5.0, delta=1.0)
+
+    @patch("worker.JOB_QUEUE_WAIT")
+    @patch("worker.r_raw")
+    @patch("worker.r_text")
+    @patch("worker.handle_single_job_logic", return_value={"s3_output_path": "outputs/j_translated.pdf"})
+    def test_a_retry_does_not_count_as_queue_wait(self, _logic, mock_redis, _raw, mock_wait):
+        added_ms = int((time.time() - 5) * 1000)
+        mock_redis.xautoclaim.return_value = ("0-0", [(f"{added_ms}-0", {"job_id": "j", "file_path": "f.pdf"})], None)
+        mock_redis.xpending_range.return_value = [{"times_delivered": 2}]
+
+        worker.run_once("worker-1", "0-0")
+
+        mock_wait.observe.assert_not_called()
