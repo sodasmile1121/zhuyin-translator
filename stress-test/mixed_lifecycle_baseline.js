@@ -27,7 +27,9 @@ export const options = {
     },
 };
 
-const testPDF = open('./test.pdf', 'b');
+// The document under test. Pick another size with -e PDF_FILE=./pdfs/doc_m.pdf (see make_test_pdfs.py).
+const pdfFile = __ENV.PDF_FILE || './test.pdf';
+const testPDF = open(pdfFile, 'b');
 
 export function lifeCycle() {
     const host = __ENV.TARGET_URL || 'http://localhost:8080';
