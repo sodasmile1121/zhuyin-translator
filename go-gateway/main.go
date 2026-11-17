@@ -572,6 +572,7 @@ func main() {
 		Addr: redisAddr,
 		DB:   0,
 	})
+	prometheus.MustRegister(&queueCollector{rdb: rdb})
 
 	pgDSN := os.Getenv("DATABASE_URL")
 	var dbConn *sql.DB
