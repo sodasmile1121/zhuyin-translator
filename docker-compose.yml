@@ -38,6 +38,10 @@ services:
       - REDIS_ADDR=redis:6379
       - DATABASE_URL=postgres://u_translator:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/translator_db?sslmode=disable
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:8081}
+      # Reconciler tuning. Only passed through when set in .env; the defaults live in go-gateway/reconcile.go.
+      - RECONCILE_INTERVAL
+      - RECONCILE_OLDER_THAN
+      - RECONCILE_COOLDOWN
       - AWS_REGION=ap-northeast-1
       - AWS_S3_BUCKET=${AWS_S3_BUCKET}
       - AWS_METADATA_SERVICE_TIMEOUT=2
@@ -61,6 +65,11 @@ services:
       - AWS_METADATA_SERVICE_TIMEOUT=2
       - AWS_METADATA_SERVICE_NUM_ATTEMPTS=1
       - PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus_multiproc_dir
+      # Worker tuning. Only passed through when set in .env; the defaults live in python-worker/worker.py.
+      - WORKER_COUNT
+      - CLAIM_MIN_IDLE_MS
+      - READ_BLOCK_MS
+      - MAX_DELIVERIES
     volumes:
       - shared-pdf:/app/outputs
       - shared-uploads:/app/uploads
