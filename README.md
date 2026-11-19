@@ -169,7 +169,7 @@ Clients can track progress via:
 
 Clients request document download via the Go API Gateway (`GET /download`).
 
-- Gateway verifies job status from Redis Cache.
+- Gateway verifies job status from the Redis cache, and from PostgreSQL when the cache entry has expired.
 - Gateway generates a short-lived (10-minute) **AWS S3 Presigned URL**.
 - Gateway responds with an HTTP 302 Redirect to direct the client to download the rendered PDF straight from AWS S3, offloading file transfer traffic from the API Gateway.
 
@@ -195,11 +195,11 @@ Workers implement several reliability mechanisms.
 
 ### Consumer Groups
 
-Multiple workers consume tasks concurrently while ensuring each job is processed only once.
+Multiple workers consume tasks concurrently and each task is delivered to one worker at a time. Delivery is **at-least-once**, so a task can occasionally be processed twice (for example after a worker crash); this is safe because the output key `outputs/<job_id>_translated.pdf` is deterministic and status updates overwrite.
 
 ### Retry
 
-Failed jobs remain in the Pending Entries List and are retried automatically.
+A failed task is not acknowledged, so it stays in the Pending Entries List and is picked up again by `XAUTOCLAIM` after it has been idle for 60 seconds (configurable), up to 3 deliveries.
 
 ### Pending Recovery
 
@@ -213,7 +213,19 @@ to recover jobs from crashed workers.
 
 ### Dead Letter Queue
 
-Jobs that exceed the retry threshold are moved into a Dead Letter Queue for further inspection instead of being discarded.
+Jobs that exceed the retry threshold are moved into a Dead Letter Queue for further inspection instead of being discarded. A task that was already delivered more than 3 times (an earlier delivery never finished, for example a worker killed by the out-of-memory killer) goes straight to the Dead Letter Queue without running again, and a `failed` event is published so the job does not stay `pending`.
+
+### Worker supervision
+
+The worker container starts several worker processes and replaces any that exit. Every service has `restart: unless-stopped`, and Redis runs with append-only persistence on a volume, so the queue state survives a restart.
+
+### Reconciler
+
+The upload handler writes to S3, then Postgres, then the queue. If the gateway crashes between the last two, the job would stay `pending` forever. A reconciler in the gateway re-publishes jobs that have been `pending` for more than 5 minutes, with a cooldown so a long queue is not enqueued again every minute. Under a deep backlog this can re-publish tasks that are only waiting, which makes workers do some duplicate work (known issue, measured in the load test below).
+
+### Gateway event recovery
+
+The gateway reads the workers' completion events through its own consumer group. It acknowledges an event only after the database status is written, and reclaims its own unacknowledged events after a restart.
 
 ---
 
@@ -276,9 +288,14 @@ This project implements several production-inspired backend patterns.
 |----------|----------------|
 | Message Queue | Redis Streams |
 | Consumer Group | ✓ |
-| Retry | ✓ |
-| Pending Recovery | XAUTOCLAIM |
-| Dead Letter Queue | ✓ |
+| Delivery semantics | At-least-once, idempotent outputs |
+| Retry | Unacknowledged tasks reclaimed by `XAUTOCLAIM`, 3 deliveries |
+| Pending Recovery | XAUTOCLAIM (workers and gateway) |
+| Dead Letter Queue | ✓ (also for tasks that crashed a worker 3 times) |
+| Dual-write gap (DB written, queue not) | Reconciler |
+| Queue durability | Redis append-only file on a volume |
+| Process supervision | Worker restart loop, `restart: unless-stopped` |
+| Cache expiry | `/status` and `/download` fall back to PostgreSQL |
 | Object Storage | AWS S3 |
 | Metadata Database | PostgreSQL |
 | Result Cache | Redis |
@@ -323,7 +340,7 @@ Complete workflow `upload → poll status → worker → download`, 20 users in 
 
 ## 2. Spike (200 → 1,000 users) and breakpoint (0 → 1,000 users)
 
-| Test | HTTP requests/s | HTTP failures | Peak queue backlog | Queue wait avg / P95 | Queue empty after k6 ended | Flows that gave up waiting (60 s) |
+| Test | HTTP requests/s | HTTP failures | Peak queue backlog | Queue wait while k6 ran, avg / P95 (see note) | Queue empty after k6 ended | Flows that gave up waiting (60 s) |
 |---|---:|---:|---:|---|---:|---:|
 | spike, xs | 564 | 0 of 169,319 | 981 | 61.5 s / 114.3 s | 16 s | 0 of 2,421 |
 | spike, m | 559 | 0 of 167,585 | 1,274 | 120.9 s / 281.9 s | 998 s | 738 of 1,033 |
@@ -331,6 +348,19 @@ Complete workflow `upload → poll status → worker → download`, 20 users in 
 
 > **Key finding: the queue absorbs the spike; the gateway is not the bottleneck.** With 1,000 users the gateway answered every HTTP request (0 failures) at about 10% CPU while the workers were at 170–180%. The work waits in Redis Streams instead of failing: the backlog peaks near 1,000 tasks and drains afterwards.
 >
+> **Queue wait column:** it covers only the tasks the workers finished while k6 was running. Tasks that were still waiting when k6 stopped finished during the drain and are not in it, so for the m tests the real waits were much longer: the dashboard below shows the average wait of the breakpoint m test climbing to about 8 minutes (P95 about 10 minutes).
+
+The three dashboard captures below come from the Grafana instance on the same host (times are 14:05 to 14:35 UTC on 2026-11-18, shown in UTC+8 on the axes as 22:05 to 22:35). The window contains two tests one after the other: the xs spike starting at about 22:09 and the m breakpoint test starting at about 22:15.
+
+![Task queue backlog and the time tasks wait in it](./docs/images/bench_queue_backlog_and_wait.png)
+*Left: tasks waiting for a worker. The xs spike (first hill) is empty about 16 s after k6 stops; the m breakpoint test (second hill) takes about 11 minutes to drain. Right: time waiting in the queue.*
+
+![Worker throughput, processing time and busy workers](./docs/images/bench_worker.png)
+*Workers finish about 9 to 10 xs documents per second but only about 2 m documents per second, and all three are busy for the whole run: the worker pool is the bottleneck.*
+
+![Host CPU and gateway requests](./docs/images/bench_gateway_and_host.png)
+*The host CPU is at about 200% (both cores) while the gateway serves up to about 900 requests/s. The CPU panel is host-wide, not per container.*
+
 > **What the table does not say:** for m documents, 60 s is shorter than the queue wait, so many simulated users gave up waiting for their result (738 of 1,033 in the spike); the tasks still completed later. The long drain times for m (671 s and 998 s) are also stretched by a known flaw (review item G61): the reconciler re-publishes tasks that are only waiting in the queue, so workers do some duplicate work (results are unchanged because outputs are idempotent). It was not measured with the reconciler off. Two of the drain times were taken from the sampled queue depth, because the harness of that day mis-measured them.
 
 ---
@@ -417,7 +447,7 @@ Prometheus (5 s scrape) and a provisioned Grafana dashboard (`grafana/provisioni
    ```bash
    cp .env.example .env
    ```
-   Required: `AWS_S3_BUCKET`, `POSTGRES_PASSWORD` (for example `openssl rand -hex 16`) and `ADMIN_PASSWORD` (Grafana). `.env` is ignored by git. Optional: `ALLOWED_ORIGINS` (defaults to `http://localhost:8081`; add the host's address to open the UI from another origin).
+   Required: `AWS_S3_BUCKET`, `POSTGRES_PASSWORD` (for example `openssl rand -hex 16`), `ADMIN_USER` and `ADMIN_PASSWORD` (the Grafana login). `.env` is ignored by git. Optional: `ALLOWED_ORIGINS` (defaults to `http://localhost:8081`; add the host's address to open the UI from another origin).
 
    The gateway and the worker reach S3 through the default AWS credential chain. On EC2, attach an IAM role with access to the bucket. Running anywhere else needs AWS credentials to be passed into the containers, which `docker-compose.yml` does not do yet.
 
