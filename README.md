@@ -22,6 +22,7 @@ The system decouples request handling from document processing using Redis Strea
 - Automatic retry mechanism
 - Dead Letter Queue (DLQ)
 - Pending message recovery using `XAUTOCLAIM`
+- Reconciler that re-publishes jobs left `pending` after a crash between the database write and the queue write
 
 ### Distributed Storage
 - AWS S3 for document storage
@@ -32,10 +33,9 @@ The system decouples request handling from document processing using Redis Strea
 - Docker Compose deployment
 - Automated CI/CD with GitHub Actions
 
-### Observability *(Work in Progress)*
-- Prometheus metrics
-- Grafana dashboards
-- k6 load testing scripts
+### Observability and Load Testing
+- Prometheus metrics (requests by status, task queue backlog, queue wait, worker processing time) and a provisioned Grafana dashboard
+- k6 load tests; in the spike test with 1,000 virtual users the gateway served about 560 req/s with 0 HTTP failures at about 10% CPU, and the worker CPU was identified as the bottleneck (see [Load Testing](#load-testing--system-benchmarks))
 
 ---
 
@@ -290,99 +290,68 @@ This project implements several production-inspired backend patterns.
 
 Current testing coverage includes:
 - Python (`pytest`) and Go (`go test -race`) unit tests, run on every pull request
-- k6 load, benchmark, breakpoint and spike tests, including an end-to-end lifecycle test (upload → status → download)
+- Integration and chaos tests against a real Redis and Postgres (worker killed mid-job, Redis restart, poison message)
+- k6 load tests: upload-only, end-to-end lifecycle (upload → status → download), spike and breakpoint
 
-> **Note:** The end-to-end and spike results below (sections 2 to 4) were measured before a fix to the worker, which at that time rendered the output PDF from a 10-character preview instead of the whole document, so the per-job processing cost was understated. The upload ingestion results (section 1) only exercise the gateway and are not affected. The end-to-end numbers will be re-measured.
+**Setup (one complete run, 2026-11-18, code at commit `8a94d13`):** one EC2 `c7i-flex.large` (2 vCPU) running the whole stack in Docker Compose (gateway, 3 worker processes, Redis, Postgres, Prometheus, Grafana). k6 ran on a laptop over a café Wi‑Fi, so the request rates below are what that link could carry; the worker CPU, processing time and queue numbers are measured on the server and do not depend on the network. Raw outputs and the report are in `docs/evidence/bench-2026-11-18/`.
 
----
+Three document sizes are used, because the worker's cost grows with the number of characters:
 
-## 1. Upload API Ingestion Benchmark
+| Size | File | Characters |
+|---|---|---:|
+| xs | `stress-test/test.pdf`, 1 page | 15 |
+| m | 10 pages | 6,169 |
+| l | 30 pages | 22,200 |
 
-Evaluated Go Gateway upload throughput using fixed concurrent users submitting PDF payloads directly to `/upload`.
-
-* **Tool:** k6  
-* **Script:** `upload_benchmark.js`  
-* **Workload:** Fixed VUs (`duration: 2m`)  
-* **Environment:** AWS EC2 Deployment  
-
-| Concurrent Users (VUs) | Avg Latency | P95 Latency | Throughput (req/s) | Error Rate |
-|---|---:|---:|---:|---:|
-| 10 | 85.5 ms | 98.77 ms | 9.20 req/s | 0.00% |
-| 50 | 88.37 ms | 116.11 ms | 45.85 req/s | 0.00% |
-| 100 | 91.12 ms | 123.95 ms | 91.04 req/s | 0.00% |
-| 200 | 107.16 ms | 200.32 ms | 179.59 req/s | 0.00% |
-| 500 | 306.31 ms | 989.09 ms | 380.24 req/s | 0.00% |
-| 1,000 | 1.59 s | 2.48 s | 382.08 req/s | 0.00% |
-
-> **Key Finding:** Ingestion throughput scales linearly up to **200 VUs**, after which it saturates at **~380 req/s** (500–1,000 VUs). P95 latency increases past 500 VUs (~989 ms → 2.48 s), signaling Gateway CPU/bandwidth bounds without incurring HTTP connection drops (0.00% error rate).
+(`stress-test/make_test_pdfs.py` generates m and l.)
 
 ---
 
-## 2. End-to-End Lifecycle Benchmark (Fixed VUs)
+## 1. End-to-end, 20 virtual users
 
-Evaluated complete workflow performance (`Upload -> Poll Status -> Worker Processing -> Download`) across low-to-medium concurrency levels.
+Complete workflow `upload → poll status → worker → download`, 20 users in a loop.
 
-* **Tool:** k6  
-* **Script:** `mixed_life_cycle_benchmark.js`  
-* **Workload:** Fixed VUs (`maxRetries: 60`)  
-* **Environment:** AWS EC2 Deployment  
+| Document | Flows/s | Flow time avg / P95 | Worker processing avg | Worker CPU avg (of 200%) | HTTP failures |
+|---|---:|---|---:|---:|---:|
+| xs | 8.23 | 2.41 s / 3.02 s | 0.29 s | 119% | 0 of 4,553 |
+| m | 1.93 | 10.06 s / 11.39 s | 1.52 s | 188% | 0 of 2,745 |
+| l | 0.62 | 29.81 s / 34.21 s | 4.67 s | 189% | 0 of 3,886 |
 
-| Concurrent Users (VUs) | Avg E2E Time | P95 E2E Time | Worker Throughput | Success Rate |
-|---|---:|---:|---:|---:|
-| 10 | 1.77 s | 1.77 s | 5.61 ops/s | 100.00% |
-| 20 | 2.51 s | 2.82 s | 7.90 ops/s | 100.00% |
-| 50 | 6.15 s | 7.11 s | 7.95 ops/s | 100.00% |
-| 100 | 12.06 s | 13.37 s | 7.93 ops/s | 100.00% |
-
-> **Key Finding:** Worker execution capacity saturates at **~8 ops/s** beyond 20 VUs. Excess incoming traffic is safely buffered inside Redis Streams; the system trades queueing dwell time (E2E latency) to ensure service availability.
+> **Key finding: the bottleneck is the worker CPU, and its cost scales with document size.** For m and l the three workers use about 190% of the 2 vCPUs. Cost per document is roughly **0.19 s of CPU + 0.13 s per 1,000 characters**, so capacity ≈ 2 vCPU ÷ cost: about 2.0 documents/s for m (measured 1.93) and 0.65/s for l (measured 0.62). The xs run is not CPU-saturated (119%); its rate is set by the client loop, not by a limit of the system. The extra time users see is queue wait, not slower processing (m: 6.3 s queue wait vs 1.5 s processing).
 
 ---
 
-## 3. Breakpoint & System Resilience Test
+## 2. Spike (200 → 1,000 users) and breakpoint (0 → 1,000 users)
 
-Evaluated system execution limits and queue resilience by ramping traffic step-by-step up to **1,000 concurrent VUs**.
+| Test | HTTP requests/s | HTTP failures | Peak queue backlog | Queue wait avg / P95 | Queue empty after k6 ended | Flows that gave up waiting (60 s) |
+|---|---:|---:|---:|---|---:|---:|
+| spike, xs | 564 | 0 of 169,319 | 981 | 61.5 s / 114.3 s | 16 s | 0 of 2,421 |
+| spike, m | 559 | 0 of 167,585 | 1,274 | 120.9 s / 281.9 s | 998 s | 738 of 1,033 |
+| breakpoint, m | 510 | 0 of 81,665 | 990 | 59.5 s / 117.0 s | 671 s | 294 of 531 |
 
-* **Tool:** k6  
-* **Script:** `breakingpoint_test.js`  
-* **Test Profile:** Stage Ramp-up (0 → 1,000 VUs over 2m10s)  
-* **Environment:** AWS EC2 Deployment  
-
-| Key Metric | Measured Value | Analysis & Architectural Insights |
-| :--- | ---: | :--- |
-| **Check Success Rate** | **100.00%** (87,142 / 87,142) | All completed status polling and payload checks succeeded without application drops. |
-| **HTTP Error Rate** | **0.00%** (0 / 87,142 reqs) | Go Gateway maintained 0% HTTP request failures under 1,000 VUs. |
-| **HTTP P95 Latency** | **51.11 ms** | API Gateway response time remained fast (<60ms) during status polling pressure. |
-| **E2E Duration Range** | **1.74s (Min) → 1m17s (P95)** | Queue dwell time scaled naturally with concurrency while maintaining complete job processing integrity. |
+> **Key finding: the queue absorbs the spike; the gateway is not the bottleneck.** With 1,000 users the gateway answered every HTTP request (0 failures) at about 10% CPU while the workers were at 170–180%. The work waits in Redis Streams instead of failing: the backlog peaks near 1,000 tasks and drains afterwards.
+>
+> **What the table does not say:** for m documents, 60 s is shorter than the queue wait, so many simulated users gave up waiting for their result (738 of 1,033 in the spike); the tasks still completed later. The long drain times for m (671 s and 998 s) are also stretched by a known flaw (review item G61): the reconciler re-publishes tasks that are only waiting in the queue, so workers do some duplicate work (results are unchanged because outputs are idempotent). It was not measured with the reconciler off. Two of the drain times were taken from the sampled queue depth, because the harness of that day mis-measured them.
 
 ---
 
-## 4. Spike & Drain Test
+## 3. Upload only (worker stopped), 2 minutes per level
 
-System telemetry captured during the **Spike & Drain Scenario** (`mixed_life_cycle_baseline.js`: 200 VU Warm-up → 1,000 VU Surge → 0 VU Queue Drain).
+| Users | Uploads/s | Upload handler P95 | Gateway CPU avg | HTTP failures |
+|---:|---:|---:|---:|---:|
+| 10 | 8.96 | 0.050 s | 1% | 0 of 1,080 |
+| 50 | 44.55 | 0.083 s | 5% | 0 of 5,396 |
+| 100 | 88.75 | 0.090 s | 11% | 0 of 10,745 |
 
-| Key Metric | Measured Value |
-| :--- | ---: |
-| **Peak Concurrent VUs** | **1,000** |
-| **HTTP Throughput** | **543.6 req/s** |
-| **HTTP P95 Latency** | **210.54 ms** |
-| **Completed Iterations** | **1,951** |
-| **HTTP Request Failures** | **3 / 163,070** |
+> Throughput scales linearly up to 100 users, with the gateway at 11% CPU. Higher levels were **not measured**: from the laptop's Wi‑Fi the upload bandwidth (about 0.8 MB/s) is the limit above roughly 50 users, so a higher level would measure the Wi‑Fi, not the gateway. An earlier table with 200–1,000 users (about 380 requests/s) came from a previous setup whose raw data is not kept, so it was removed rather than mixed with this run.
 
-> **Observation:** The 3 HTTP request failures were intermittent **S3 download timeouts** observed during the high-concurrency phase. The upload and status-check paths remained stable, with the failures isolated to the downstream download step.
-
-| **System & Gateway Performance** | **Worker & Hardware Resources** |
-| :---: | :---: |
-| ![API QPS & Status](./docs/images/grafana_qps_status.png)<br>*API QPS & HTTP Status (`/upload` only)* | ![Gateway Resources](./docs/images/grafana_gateway_latency.png)<br>*Gateway Latency (P95) & Active Goroutines* |
-| ![Worker Processing](./docs/images/grafana_worker_throughput.png)<br>*Worker Job Execution Rate & Duration* | ![EC2 Resources](./docs/images/grafana_ec2_resources.png)<br>*EC2 CPU & Memory Utilization* |
-
-#### Observability & Architectural Takeaways:
-
-* **Surge Absorption & Backpressure:** Asynchronous queueing via Redis Streams successfully buffered sudden 1,000-VU traffic bursts, preventing worker CPU exhaustion from crashing the web gateway.
-* **Worker Queue Clearance:** Worker throughput stayed at roughly **7–8 ops/s** during peak load and was still about 8 ops/s when the load stopped (the capture ends before the queue is shown to be empty, and no queue-depth metric is exported yet).
-* **Gateway Resource Efficiency:** The Go Gateway managed **~1,000 active goroutines** while maintaining a lightweight **Heap Allocation peaking around 32 MiB** and GC pause times **< 600 µs**.
-* **Bottleneck Identification:** Host CPU stayed at about **190%** of the 2 vCPUs, all three workers were busy for the whole run and each job took roughly 0.4 s (3 workers ÷ 0.4 s ≈ 7.5 jobs/s), which points to the Python worker pool as the end-to-end bottleneck. The CPU chart is host-wide; per-container CPU is not shown.
 ---
 
+## 4. Observability
+
+Prometheus (5 s scrape) and a provisioned Grafana dashboard (`grafana/provisioning/dashboards/zhuyin-pipeline.json`) show request counts by status, task queue backlog and in-flight tasks, queue wait time, worker jobs and processing time, and host CPU, memory and network. Per-container CPU is not shown (cAdvisor cannot name containers on this Docker version); `docker stats` was sampled during the tests instead.
+
+---
 # Project Structure
 
 ```
@@ -392,7 +361,10 @@ System telemetry captured during the **Spike & Drain Scenario** (`mixed_life_cyc
 │   ├── sql/                    # SQL queries and schema
 │   ├── index.html              # Static frontend page
 │   ├── main.go                 # Gateway entry point & handlers
-│   ├── main_test.go            # Go unit tests
+│   ├── job_events.go           # Consumer of the worker's completion events
+│   ├── reconcile.go            # Reconciler for jobs stuck in pending
+│   ├── queue_metrics.go        # Task queue backlog and in-flight metrics
+│   ├── *_test.go               # Go unit and integration tests
 │   ├── sqlc.yaml               # sqlc configuration
 │   └── Dockerfile
 │
@@ -408,8 +380,11 @@ System telemetry captured during the **Spike & Drain Scenario** (`mixed_life_cyc
 │
 ├── stress-test/                # k6 Performance & Load Testing
 │   ├── breakpoint_test.js
-│   ├── mixed_lifecycle_test.js
-│   └── upload-baseline.js
+│   ├── mixed_lifecycle_baseline.js   # spike test
+│   ├── mixed_lifecycle_benchmark.js  # end-to-end, fixed VUs
+│   ├── upload_baseline.js
+│   ├── upload_benchmark.js
+│   └── make_test_pdfs.py             # generates the m and l documents
 │
 ├── prometheus/                 # Prometheus metrics configuration
 ├── grafana/                    # Grafana dashboard definitions
@@ -472,7 +447,8 @@ System telemetry captured during the **Spike & Drain Scenario** (`mixed_life_cyc
 - Horizontal worker auto scaling
 - OpenTelemetry distributed tracing
 - Rate limiting
-- Performance benchmarking under large-scale concurrent workloads
+- Upload benchmark above 100 virtual users from a wired network or a second host (the laptop's Wi‑Fi upload bandwidth was the limit)
+- Avoid duplicate work when the reconciler re-publishes tasks that are only waiting in a long queue
 - Distributed metrics aggregation
 
 ---
