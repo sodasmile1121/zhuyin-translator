@@ -35,7 +35,7 @@ The system decouples request handling from document processing using Redis Strea
 
 ### Observability and Load Testing
 - Prometheus metrics (requests by status, task queue backlog, queue wait, worker processing time) and a provisioned Grafana dashboard
-- k6 load tests; in the spike test with 1,000 virtual users the gateway served about 560 req/s with 0 HTTP failures at about 10% CPU, and the worker CPU was identified as the bottleneck (see [Load Testing](#load-testing--system-benchmarks))
+- k6 load tests; in the spike test with 1,000 virtual users the gateway answered every request (about 560 requests/s, 0 HTTP failures) and the worker CPU was identified as the bottleneck (see [Load Testing](#load-testing--system-benchmarks))
 
 ---
 
@@ -305,83 +305,51 @@ This project implements several production-inspired backend patterns.
 ---
 # Load Testing & System Benchmarks
 
-Current testing coverage includes:
+Testing coverage:
 - Python (`pytest`) and Go (`go test -race`) unit tests, run on every pull request
-- Integration and chaos tests against a real Redis and Postgres (worker killed mid-job, Redis restart, poison message)
-- k6 load tests: upload-only, end-to-end lifecycle (upload → status → download), spike and breakpoint
+- Integration and chaos tests against a real Redis and Postgres (worker killed mid-job, poison message, DLQ)
+- k6 load tests: upload only, end to end (upload → status → download), spike and breakpoint
 
-**Setup (one complete run, 2026-11-18, code at commit `8a94d13`):** one EC2 `c7i-flex.large` (2 vCPU) running the whole stack in Docker Compose (gateway, 3 worker processes, Redis, Postgres, Prometheus, Grafana). k6 ran on a laptop over a café Wi‑Fi, so the request rates below are what that link could carry; the worker CPU, processing time and queue numbers are measured on the server and do not depend on the network. Raw outputs and the report are in `docs/evidence/bench-2026-11-18/`.
+Measured on 2026-11-18 (commit `8a94d13`): one EC2 `c7i-flex.large` (2 vCPU) running everything in Docker Compose. k6 ran on a laptop over a regular network connection, so request rates reflect that link; CPU, processing time and queue figures come from the server. Full tables, method and limits: **[docs/benchmark-report.md](./docs/benchmark-report.md)**.
 
-Three document sizes are used, because the worker's cost grows with the number of characters:
+## Results in four points
 
-| Size | File | Characters |
-|---|---|---:|
-| xs | `stress-test/test.pdf`, 1 page | 15 |
-| m | 10 pages | 6,169 |
-| l | 30 pages | 22,200 |
+1. **The bottleneck is the worker CPU.** With 10-page (m) and 30-page (l) documents the three workers use about 190% of the two cores. The gateway never used more than about 23% of one core.
+2. **Each document costs CPU time that grows with its characters.** Dividing CPU use by the number of finished documents gives about 0.95 s for the m document (6,169 characters) and 2.9 s for the l document (22,200 characters). Two cores can therefore finish about 2 m documents per second or 0.7 l documents per second; the runs measured 1.93 and 0.62 with the CPU about 93% busy. This is inferred from these runs, not an independent prediction.
+3. **The queue absorbs the spike.** With up to 1,000 virtual users the gateway answered all 169,319 HTTP requests of the spike test (1-page document) without a failure, about 560 requests per second, most of them status polls. The tasks waited in Redis (up to 981 at once) and the queue was empty 16 seconds after the load stopped.
+4. **The extra time a user waits is queueing, not slower processing.** For the m document processing takes 1.5 s and the task waits 6.3 s in the queue; for l, 4.7 s against 23 s.
 
-(`stress-test/make_test_pdfs.py` generates m and l.)
+**What these numbers do not show**
+- "1,000 users" are k6 virtual users looping through the whole flow, not 1,000 simultaneous connections.
+- With 10-page documents the queue wait is longer than the time a simulated user polls (about 2 minutes in the spike test, 1.5 in the breakpoint test), so many gave up (738 of 1,033 and 294 of 531). Their tasks still finished later.
+- The queues of those two tests took 998 s and 671 s to empty. Part of that is duplicate work: the reconciler, which re-sends jobs that look stuck, also re-sends tasks that are only waiting in a long queue. I did not measure it with the reconciler switched off.
+- Upload was measured up to 100 users (88.75 uploads/s, gateway at 11% of one core). Above that the laptop's connection, not the gateway, was the limit, so I did not measure it.
 
----
+## End to end, 20 virtual users
 
-## 1. End-to-end, 20 virtual users
+| Document | Flows/s | Flow time avg / P95 | Worker processing avg | Queue wait avg | Worker CPU avg (of 200%) | HTTP failures |
+|---|---:|---|---:|---:|---:|---|
+| xs, 1 page, 15 characters | 8.23 | 2.41 s / 3.02 s | 0.29 s | 0.34 s | 119% | 0 of 4,553 |
+| m, 10 pages, 6,169 characters | 1.93 | 10.06 s / 11.39 s | 1.52 s | 6.26 s | 188% | 0 of 2,745 |
+| l, 30 pages, 22,200 characters | 0.62 | 29.81 s / 34.21 s | 4.67 s | 23.10 s | 189% | 0 of 3,886 |
 
-Complete workflow `upload → poll status → worker → download`, 20 users in a loop.
+The xs run is not CPU-bound, so its rate is set by the users' loop. CPU figures are from `docker stats`, where 100% is one core.
 
-| Document | Flows/s | Flow time avg / P95 | Worker processing avg | Worker CPU avg (of 200%) | HTTP failures |
-|---|---:|---|---:|---:|---:|
-| xs | 8.23 | 2.41 s / 3.02 s | 0.29 s | 119% | 0 of 4,553 |
-| m | 1.93 | 10.06 s / 11.39 s | 1.52 s | 188% | 0 of 2,745 |
-| l | 0.62 | 29.81 s / 34.21 s | 4.67 s | 189% | 0 of 3,886 |
+## Charts
 
-> **Key finding: the bottleneck is the worker CPU, and its cost scales with document size.** For m and l the three workers use about 190% of the 2 vCPUs. Cost per document is roughly **0.19 s of CPU + 0.13 s per 1,000 characters**, so capacity ≈ 2 vCPU ÷ cost: about 2.0 documents/s for m (measured 1.93) and 0.65/s for l (measured 0.62). The xs run is not CPU-saturated (119%); its rate is set by the client loop, not by a limit of the system. The extra time users see is queue wait, not slower processing (m: 6.3 s queue wait vs 1.5 s processing).
+The Grafana captures and the CPU chart below cover **three tests in a row** (axis in UTC+8): the end of the end-to-end test with the 30-page document (22:05 to 22:09, 20 users), the spike test with the 1-page document (22:09 to 22:14), and the breakpoint test with the 10-page document (from 22:15; the queue drains until about 22:29). More captures are in the [report](./docs/benchmark-report.md#4-dashboard-captures).
 
----
-
-## 2. Spike (200 → 1,000 users) and breakpoint (0 → 1,000 users)
-
-| Test | HTTP requests/s | HTTP failures | Peak queue backlog | Queue wait while k6 ran, avg / P95 (see note) | Queue empty after k6 ended | Flows that gave up waiting (60 s) |
-|---|---:|---:|---:|---|---:|---:|
-| spike, xs | 564 | 0 of 169,319 | 981 | 61.5 s / 114.3 s | 16 s | 0 of 2,421 |
-| spike, m | 559 | 0 of 167,585 | 1,274 | 120.9 s / 281.9 s | 998 s | 738 of 1,033 |
-| breakpoint, m | 510 | 0 of 81,665 | 990 | 59.5 s / 117.0 s | 671 s | 294 of 531 |
-
-> **Key finding: the queue absorbs the spike; the gateway is not the bottleneck.** With 1,000 users the gateway answered every HTTP request (0 failures) at about 10% CPU while the workers were at 170–180%. The work waits in Redis Streams instead of failing: the backlog peaks near 1,000 tasks and drains afterwards.
->
-> **Queue wait column:** it covers only the tasks the workers finished while k6 was running. Tasks that were still waiting when k6 stopped finished during the drain and are not in it, so for the m tests the real waits were much longer: the dashboard below shows the average wait of the breakpoint m test climbing to about 8 minutes (P95 about 10 minutes).
-
-The three dashboard captures below come from the Grafana instance on the same host (times are 14:05 to 14:35 UTC on 2026-11-18, shown in UTC+8 on the axes as 22:05 to 22:35). The window contains two tests one after the other: the xs spike starting at about 22:09 and the m breakpoint test starting at about 22:15.
-
-![Task queue backlog and the time tasks wait in it](./docs/images/bench_queue_backlog_and_wait.png)
-*Left: tasks waiting for a worker. The xs spike (first hill) is empty about 16 s after k6 stops; the m breakpoint test (second hill) takes about 11 minutes to drain. Right: time waiting in the queue.*
+![CPU use of the workers and the gateway](./docs/images/bench_cpu_worker_vs_gateway.png)
+*Point 1. Drawn from the `docker stats` samples taken during these tests (100% = one core). The workers stay near the 200% line; the gateway stays near the bottom.*
 
 ![Worker throughput, processing time and busy workers](./docs/images/bench_worker.png)
-*Workers finish about 9 to 10 xs documents per second but only about 2 m documents per second, and all three are busy for the whole run: the worker pool is the bottleneck.*
+*Points 2 and 4. About 0.6 documents/s and 4.7 s each for l, about 9.5 and 0.3 s for xs, about 2 and 1.5 s for m: the slower each document, the fewer finish per second.*
 
-![Host CPU and gateway requests](./docs/images/bench_gateway_and_host.png)
-*The host CPU is at about 200% (both cores) while the gateway serves up to about 900 requests/s. The CPU panel is host-wide, not per container.*
-
-> **What the table does not say:** for m documents, 60 s is shorter than the queue wait, so many simulated users gave up waiting for their result (738 of 1,033 in the spike); the tasks still completed later. The long drain times for m (671 s and 998 s) are also stretched by a known flaw (review item G61): the reconciler re-publishes tasks that are only waiting in the queue, so workers do some duplicate work (results are unchanged because outputs are idempotent). It was not measured with the reconciler off. Two of the drain times were taken from the sampled queue depth, because the harness of that day mis-measured them.
+![Task queue backlog and the time tasks wait in it](./docs/images/bench_queue_backlog_and_wait.png)
+*Points 3 and 4. Left: tasks waiting for a worker. The xs spike (first hill) is empty about 16 s after the load stops; the m breakpoint test (second hill) needs about 11 minutes. Right: time waiting in the queue; the P95 line moves in steps because it is read from histogram buckets that stop at 600 s.*
 
 ---
 
-## 3. Upload only (worker stopped), 2 minutes per level
-
-| Users | Uploads/s | Upload handler P95 | Gateway CPU avg | HTTP failures |
-|---:|---:|---:|---:|---:|
-| 10 | 8.96 | 0.050 s | 1% | 0 of 1,080 |
-| 50 | 44.55 | 0.083 s | 5% | 0 of 5,396 |
-| 100 | 88.75 | 0.090 s | 11% | 0 of 10,745 |
-
-> Throughput scales linearly up to 100 users, with the gateway at 11% CPU. Higher levels were **not measured**: from the laptop's Wi‑Fi the upload bandwidth (about 0.8 MB/s) is the limit above roughly 50 users, so a higher level would measure the Wi‑Fi, not the gateway. An earlier table with 200–1,000 users (about 380 requests/s) came from a previous setup whose raw data is not kept, so it was removed rather than mixed with this run.
-
----
-
-## 4. Observability
-
-Prometheus (5 s scrape) and a provisioned Grafana dashboard (`grafana/provisioning/dashboards/zhuyin-pipeline.json`) show request counts by status, task queue backlog and in-flight tasks, queue wait time, worker jobs and processing time, and host CPU, memory and network. Per-container CPU is not shown (cAdvisor cannot name containers on this Docker version); `docker stats` was sampled during the tests instead.
-
----
 # Project Structure
 
 ```
