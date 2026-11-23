@@ -162,8 +162,8 @@ After processing,
 - the Gateway updates the job status
 
 Clients can track progress via:
-- WebSocket notifications: Instant push upon job completion.
-- REST API (`GET /status`): Polls Redis cache with a database fallback for current job status.
+- WebSocket notifications: instant push upon job completion. The web UI uses this, then fetches `GET /status` once for the result.
+- REST API (`GET /status`): reads the Redis cache with a database fallback. Other clients can poll it (the load tests do).
 
 ---
 
@@ -256,12 +256,9 @@ Stores compressed annotation results for fast status retrieval.
 
 ## Real-time Job Tracking
 
-Clients can monitor processing progress through
+The web UI opens a WebSocket for the completion signal, then fetches `GET /status` once for the result. `GET /status` can also be polled by other clients (the load tests do); it reads the Redis cache and falls back to PostgreSQL.
 
-- REST polling
-- WebSocket notifications
-
-without waiting for synchronous processing.
+Nothing in the web UI polls, so a WebSocket that drops silently leaves the page waiting (known limitation).
 
 ---
 
