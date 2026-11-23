@@ -312,17 +312,22 @@ Testing coverage:
 
 Measured on 2026-11-18 (commit `8a94d13`): one EC2 `c7i-flex.large` (2 vCPU) running everything in Docker Compose. k6 ran on a laptop over a regular network connection, so request rates reflect that link; CPU, processing time and queue figures come from the server. Full tables, method and limits: **[docs/benchmark-report.md](./docs/benchmark-report.md)**.
 
+**What was run** (xs = 1 page, 15 characters; m = 10 pages, 6,169 characters; l = 30 pages, 22,200 characters):
+- End to end: 20 virtual users, with xs, m and l.
+- Spike (200 up to 1,000 virtual users) with xs and with m; breakpoint (0 up to 1,000) with m.
+- Upload only (workers stopped): up to 100 virtual users.
+
 ## Results in four points
 
-1. **The bottleneck is the worker CPU.** With 10-page (m) and 30-page (l) documents the three workers use about 190% of the two cores. The gateway never used more than about 23% of one core.
-2. **Each document costs CPU time that grows with its characters.** Dividing CPU use by the number of finished documents gives about 0.95 s for the m document (6,169 characters) and 2.9 s for the l document (22,200 characters). Two cores can therefore finish about 2 m documents per second or 0.7 l documents per second; the runs measured 1.93 and 0.62 with the CPU about 93% busy. This is inferred from these runs, not an independent prediction.
-3. **The queue absorbs the spike.** With up to 1,000 virtual users the gateway answered all 169,319 HTTP requests of the spike test (1-page document) without a failure, about 560 requests per second, most of them status polls. The tasks waited in Redis (up to 981 at once) and the queue was empty 16 seconds after the load stopped.
-4. **The extra time a user waits is queueing, not slower processing.** For the m document processing takes 1.5 s and the task waits 6.3 s in the queue; for l, 4.7 s against 23 s.
+1. **The bottleneck is the worker CPU.** With the m and l documents the three workers use about 190% of the two cores. The gateway never used more than about 23% of one core.
+2. **Each document costs CPU time that grows with its characters.** Dividing CPU use by the number of finished documents (inferred from these runs) gives about 0.95 s for the m document (6,169 characters) and 2.9 s for the l document (22,200 characters). Two cores can therefore finish about 2 m documents per second or 0.7 l documents per second; the runs measured 1.93 and 0.62 with the CPU about 93% busy.
+3. **The queue absorbs the spike.** In the spike test with the smallest document (xs, 1 page) and up to 1,000 virtual users, the gateway answered all 169,319 HTTP requests without a failure, about 560 requests per second, most of them status polls. The tasks waited in Redis (up to 981 at once) and the queue was empty 16 seconds after the load stopped. With 10-page documents the same test behaved differently (see below).
+4. **The extra time a user waits is queueing, not slower processing.** In the end-to-end test (20 users), the m document takes 1.5 s to process and its task waits 6.3 s in the queue; for l, 4.7 s against 23 s.
 
 **What these numbers do not show**
 - "1,000 users" are k6 virtual users looping through the whole flow, not 1,000 simultaneous connections.
 - With 10-page documents the queue wait is longer than the time a simulated user polls (about 2 minutes in the spike test, 1.5 in the breakpoint test), so many gave up (738 of 1,033 and 294 of 531). Their tasks still finished later.
-- The queues of those two tests took 998 s and 671 s to empty. Part of that is duplicate work: the reconciler, which re-sends jobs that look stuck, also re-sends tasks that are only waiting in a long queue. I did not measure it with the reconciler switched off.
+- The queues of the 10-page (m) spike test and breakpoint test took 998 s and 671 s to empty (the 1-page spike test: 16 s). Part of that is duplicate work: the reconciler, which re-sends jobs that look stuck, also re-sends tasks that are only waiting in a long queue. I did not measure it with the reconciler switched off.
 - Upload was measured up to 100 users (88.75 uploads/s, gateway at 11% of one core). Above that the laptop's connection, not the gateway, was the limit, so I did not measure it.
 
 ## End to end, 20 virtual users
@@ -333,20 +338,28 @@ Measured on 2026-11-18 (commit `8a94d13`): one EC2 `c7i-flex.large` (2 vCPU) run
 | m, 10 pages, 6,169 characters | 1.93 | 10.06 s / 11.39 s | 1.52 s | 6.26 s | 188% | 0 of 2,745 |
 | l, 30 pages, 22,200 characters | 0.62 | 29.81 s / 34.21 s | 4.67 s | 23.10 s | 189% | 0 of 3,886 |
 
-The xs run is not CPU-bound, so its rate is set by the users' loop. CPU figures are from `docker stats`, where 100% is one core.
+xs does not use up the CPU (119%); its speed is set by the users' loop. CPU figures are from `docker stats`, where 100% is one core.
 
 ## Charts
 
-The Grafana captures and the CPU chart below cover **three tests in a row** (axis in UTC+8): the end of the end-to-end test with the 30-page document (22:05 to 22:09, 20 users), the spike test with the 1-page document (22:09 to 22:14), and the breakpoint test with the 10-page document (from 22:15; the queue drains until about 22:29). More captures are in the [report](./docs/benchmark-report.md#4-dashboard-captures).
+The Grafana captures and the CPU chart below cover **three tests in a row** on 2026-11-18. Axis times are UTC+8:
+
+| Axis time | Test | Document | Virtual users |
+|---|---|---|---|
+| 22:05 to 22:09 | end to end (its last part) | l, 30 pages | 20 |
+| 22:09 to 22:14 | spike | xs, 1 page | up to 1,000 |
+| 22:15 on (queue empty about 22:29) | breakpoint | m, 10 pages | up to 1,000 |
+
+The other tests (end to end with xs and m, spike with m) are not in these charts. More captures are in the [report](./docs/benchmark-report.md#4-dashboard-captures).
 
 ![CPU use of the workers and the gateway](./docs/images/bench_cpu_worker_vs_gateway.png)
-*Point 1. Drawn from the `docker stats` samples taken during these tests (100% = one core). The workers stay near the 200% line; the gateway stays near the bottom.*
+*Point 1, all three segments. Drawn from the `docker stats` samples taken during these tests (100% = one core). The workers stay near the 200% line; the gateway stays near the bottom.*
 
 ![Worker throughput, processing time and busy workers](./docs/images/bench_worker.png)
-*Points 2 and 4. About 0.6 documents/s and 4.7 s each for l, about 9.5 and 0.3 s for xs, about 2 and 1.5 s for m: the slower each document, the fewer finish per second.*
+*Points 2 and 4, segments in order l, xs, m. About 0.6 documents/s and 4.7 s each for l, about 9.5 and 0.3 s for xs, about 2 and 1.5 s for m: the slower each document, the fewer finish per second.*
 
 ![Task queue backlog and the time tasks wait in it](./docs/images/bench_queue_backlog_and_wait.png)
-*Points 3 and 4. Left: tasks waiting for a worker. The xs spike (first hill) is empty about 16 s after the load stops; the m breakpoint test (second hill) needs about 11 minutes. Right: time waiting in the queue; the P95 line moves in steps because it is read from histogram buckets that stop at 600 s.*
+*Points 3 and 4. Left: tasks waiting for a worker. The xs spike (first hill; the l test before it barely shows) is empty about 16 s after the load stops; the m breakpoint test (second hill) needs about 11 minutes. Right: time waiting in the queue; the P95 line moves in steps because it is read from histogram buckets that stop at 600 s.*
 
 ---
 
