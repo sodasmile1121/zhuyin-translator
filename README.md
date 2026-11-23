@@ -60,7 +60,7 @@ flowchart TD
 
     subgraph Workers ["Python Worker Pool"]
         Worker["Python Workers
-        (PyMuPDF & AI Processing)"]
+        (PyMuPDF, pypinyin, ReportLab)"]
     end
 
     DLQ["stream:task:dlq
@@ -84,11 +84,12 @@ flowchart TD
     Worker -->|7. Cache Gzip Result| Cache
     Worker -->|8. Publish Completion| JobStream
 
-    Worker -. Retry Mechanism .-> TaskStream
+    Worker -. "XAUTOCLAIM after 60 s idle" .-> TaskStream
     Worker -. Failed 3x .-> DLQ
 
     %% 3. 即時推播通知流程 (把 10 的箭頭修正為 Gateway -> Client)
     JobStream -->|9. Consumer Group Read| Gateway
+    Gateway -->|Update job status| PG
     Gateway -->|10. Push Completion Event| Client
     Client <-->|WebSocket Conn /ws| Gateway
 
@@ -97,12 +98,13 @@ flowchart TD
     Gateway -->|Fallback Status| PG
     Gateway -->|Generate Download Link| S3
 
+    Gateway -. "Reconciler: find stuck jobs" .-> PG
+    Gateway -. "Reconciler: re-publish task" .-> TaskStream
+
     Client -. Rest Fetch Status /status .-> Gateway
     Gateway -. Redirect Download /download .-> Client
     Client -.->|Direct Download via Presigned URL| S3
 ```
-
-A static version of this diagram: [`docs/images/system_architecture.png`](./docs/images/system_architecture.png).
 
 ---
 
@@ -381,7 +383,7 @@ The other tests (end to end with xs and m, spike with m) are not in these charts
 │
 ├── python-worker/              # Python Background Worker (PDF Processing)
 │   ├── models/                 # Data models (Job schema)
-│   ├── processors/             # Core processing pipeline & AI engines
+│   ├── processors/             # Core processing pipeline
 │   ├── services/               # PDF rendering & helper services
 │   ├── fonts/                  # Custom fonts for rendering
 │   ├── worker.py               # Worker entry point (Consumer Group logic)
