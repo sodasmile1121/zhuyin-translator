@@ -325,7 +325,7 @@ Measured on 2026-11-18 (commit `8a94d13`): one EC2 `c7i-flex.large` (2 vCPU) run
 
 **What these numbers do not show**
 - "1,000 users" are k6 virtual users looping through the whole flow, not 1,000 simultaneous connections.
-- With 10-page documents the queue wait is longer than the time a simulated user polls (about 2 minutes in the spike test, 1.5 in the breakpoint test), so many gave up (738 of 1,033 and 294 of 531). Their tasks still finished later.
+- With 10-page documents the queue wait is longer than the time a simulated user is willing to wait (about 2 minutes in the spike test, 1.5 in the breakpoint test), so most never got a result in time. In the spike test about 1,720 flows started: 295 got a result, 738 gave up and 698 were cut off when k6 stopped (breakpoint test: 1,229 started, 237, 294 and 711). Their tasks were all uploaded and finished later.
 - The queues of the 10-page (m) spike test and breakpoint test took 998 s and 671 s to empty (the 1-page spike test: 16 s). Part of that is duplicate work: the reconciler, which re-sends jobs that look stuck, also re-sends tasks that are only waiting in a long queue. I did not measure it with the reconciler switched off.
 - Upload was measured up to 100 users with the small xs file (88.75 uploads/s, gateway at 11% of one core); larger files send more bytes per upload. Above that the laptop's connection, not the gateway, was the limit, so I did not measure it.
 

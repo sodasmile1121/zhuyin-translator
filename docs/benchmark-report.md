@@ -67,10 +67,19 @@ Reading it:
 CPU columns are averages and maxima over the time k6 ran.
 
 - **The queue absorbs the spike.** With up to 1,000 users the gateway answered every HTTP request while the workers were the busy part. Most requests are status polls, so the request rate is not an upload rate.
-- **Giving up.** A simulated user polls the status for a limited time and then stops: up to 120 polls (about 2 minutes) in the spike tests and 90 polls (about 1.5 minutes) in the breakpoint test. With m documents the queue wait is longer than that, so many users gave up (738 of 1,033 in the spike, 294 of 531 in the breakpoint). Their tasks still finished later, during the drain.
+- **Not every user got a result (m documents).** A simulated user polls the status for a limited time and then gives up: up to 120 polls (about 2 minutes) in the spike tests, 90 polls (about 1.5 minutes) in the breakpoint test. At the end k6 also cuts off users who are still waiting: it gives a user it removes one minute to finish, then stops it. With m documents the queue wait is longer than both limits, so most flows ended without a result (table below). Their tasks were uploaded and finished later, during the drain.
 - **Requests per second are not worker throughput.** k6 counts a flow as done even when it gave up.
 - **Queue wait, measured while k6 ran.** From Prometheus over the k6 window only: spike xs 61.5 s average / 114.3 s P95, spike m 120.9 s / 281.9 s, breakpoint m 59.5 s / 117.0 s. Tasks still waiting when k6 stopped finished during the drain and are not in these numbers, so for the m tests the real waits were longer (figure below). The wait histogram stops at 600 s, so the P95 of the breakpoint test is "more than 10 minutes", not an exact value. The average line in the Grafana panel is a rolling value, not the average over the whole test.
-- **Duplicate work (a known flaw).** The reconciler re-sends jobs that look stuck. Under a deep backlog it also re-sends tasks that are only waiting in the queue, so the workers did some duplicate work and the m tests took longer to drain. Results are unchanged because outputs are idempotent. This was not measured with the reconciler switched off. In the spike m test the gateway accepted 1,728 uploads while the workers finished 2,563 tasks.
+- **Duplicate work (a known flaw).** The reconciler re-sends jobs that look stuck. Under a deep backlog it also re-sends tasks that are only waiting in the queue, so the workers did some duplicate work and the m tests took longer to drain. Results are unchanged because outputs are idempotent. This was not measured with the reconciler switched off. The surplus matches the gateway log (table below).
+
+How the flows of the two m tests ended (k6) and how much work the workers did (Prometheus, test plus drain):
+
+| Test | Flows started | Got a result | Gave up | Cut off when k6 stopped | Uploads accepted | Tasks the workers finished | Tasks the reconciler re-sent (log) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| spike, m | 1,722 | 295 | 738 | 698 | 1,728 | 2,563 | 831 |
+| breakpoint, m | 1,229 | 237 | 294 | 711 | 1,236 | 1,620 | 382 |
+
+"Flows started" is k6's completed plus cut-off iterations; the gateway counts a few more uploads (6 and 7), a difference at the edges of the measurement window. The workers finished more tasks than there were uploads (834 and 384 more), which is about what the reconciler re-sent.
 
 ## 3. Upload only (workers stopped), 2 minutes per level
 
