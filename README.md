@@ -449,20 +449,10 @@ The other tests (end to end with xs and m, spike with m) are not in these charts
    ```bash
    docker compose down
    ```
+
 ---
 
 # Future Improvements
 
 - Kubernetes deployment
 - Horizontal worker auto scaling
-- OpenTelemetry distributed tracing
-- Rate limiting
-- Upload benchmark above 100 virtual users from a wired network or a second host (the laptop's Wi‑Fi upload bandwidth was the limit)
-- Avoid duplicate work when the reconciler re-publishes tasks that are only waiting in a long queue
-- Distributed metrics aggregation
-
----
-
-# License
-
-This project is intended for educational and portfolio purposes.
