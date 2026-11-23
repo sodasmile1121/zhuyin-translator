@@ -315,7 +315,7 @@ Measured on 2026-11-18 (commit `8a94d13`): one EC2 `c7i-flex.large` (2 vCPU) run
 **What was run** (xs = 1 page, 15 characters; m = 10 pages, 6,169 characters; l = 30 pages, 22,200 characters):
 - End to end: 20 virtual users, with xs, m and l.
 - Spike (200 up to 1,000 virtual users) with xs and with m; breakpoint (0 up to 1,000) with m.
-- Upload only (workers stopped): up to 100 virtual users.
+- Upload only (workers stopped), with xs (1 page, 7.8 KB file): up to 100 virtual users.
 
 ## Results in four points
 
@@ -328,7 +328,7 @@ Measured on 2026-11-18 (commit `8a94d13`): one EC2 `c7i-flex.large` (2 vCPU) run
 - "1,000 users" are k6 virtual users looping through the whole flow, not 1,000 simultaneous connections.
 - With 10-page documents the queue wait is longer than the time a simulated user polls (about 2 minutes in the spike test, 1.5 in the breakpoint test), so many gave up (738 of 1,033 and 294 of 531). Their tasks still finished later.
 - The queues of the 10-page (m) spike test and breakpoint test took 998 s and 671 s to empty (the 1-page spike test: 16 s). Part of that is duplicate work: the reconciler, which re-sends jobs that look stuck, also re-sends tasks that are only waiting in a long queue. I did not measure it with the reconciler switched off.
-- Upload was measured up to 100 users (88.75 uploads/s, gateway at 11% of one core). Above that the laptop's connection, not the gateway, was the limit, so I did not measure it.
+- Upload was measured up to 100 users with the small xs file (88.75 uploads/s, gateway at 11% of one core); larger files send more bytes per upload. Above that the laptop's connection, not the gateway, was the limit, so I did not measure it.
 
 ## End to end, 20 virtual users
 
